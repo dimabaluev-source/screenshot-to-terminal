@@ -1,0 +1,5 @@
+keyboard>=0.13
+Pillow>=10.0
+pywin32>=305
+pystray>=0.19
+winsdk>=1.0
