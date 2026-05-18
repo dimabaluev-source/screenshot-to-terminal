@@ -43,6 +43,83 @@ OCR_LANGUAGES = ('ru-RU', 'en-US')
 MUTEX_NAME = "ScreenshotToTerminal_SingleInstance_Mutex"
 APP_TITLE = "Screenshot to Terminal"
 
+DEFAULT_LANGUAGE = 'en'
+
+I18N = {
+    'en': {
+        'lang.name': 'English',
+        'notify.no_clipboard_image': 'Clipboard has no image',
+        'notify.saved': 'Saved: {name}',
+        'notify.quick_saved': 'Quick saved: {name}',
+        'notify.area_saved': 'Area saved: {name}',
+        'notify.no_text': 'No text found',
+        'notify.ocr_result': 'OCR ({count} chars): {preview}',
+        'notify.ocr_error': 'OCR error: {error}',
+        'notify.prefix_set': 'Prefix: {prefix}_…',
+        'notify.prefix_cleared': 'Prefix cleared',
+        'notify.autoresize_on': 'Auto-resize: on',
+        'notify.autoresize_off': 'Auto-resize: off',
+        'notify.autostart_on': 'Autostart: on',
+        'notify.autostart_off': 'Autostart: off',
+        'notify.log_empty': 'Log is empty — no errors yet',
+        'notify.language_changed': 'Language: English',
+        'msg.already_running': 'Screenshot helper is already running — check the tray icon.',
+        'dialog.save_title': 'Save screenshot as...',
+        'dialog.prefix_title': 'Screenshot filename prefix',
+        'dialog.prefix_prompt': "Filename prefix (empty = use default '{default}'):",
+        'default.filename_base': 'Screenshot',
+        'menu.title': 'Screenshot Helper',
+        'menu.hotkey_dialog': 'Ctrl+Alt+S — save via dialog',
+        'menu.hotkey_quick': 'Ctrl+Alt+Shift+S — quick save to Pictures\\Screenshots',
+        'menu.hotkey_area': 'Ctrl+Alt+A — capture screen area',
+        'menu.hotkey_ocr': 'Ctrl+Alt+D — OCR (text from clipboard image)',
+        'menu.prefix_none': 'Filename prefix: (none)',
+        'menu.prefix': 'Filename prefix: {value}',
+        'menu.autoresize': 'Auto-resize large (>{px}px)',
+        'menu.autostart': 'Autostart with Windows',
+        'menu.open_folder': 'Open screenshots folder',
+        'menu.open_log': 'Open error log',
+        'menu.language': 'Language',
+        'menu.exit': 'Exit',
+    },
+    'ru': {
+        'lang.name': 'Русский',
+        'notify.no_clipboard_image': 'В буфере нет картинки',
+        'notify.saved': 'Сохранено: {name}',
+        'notify.quick_saved': 'Быстро сохранено: {name}',
+        'notify.area_saved': 'Область сохранена: {name}',
+        'notify.no_text': 'Текст не найден',
+        'notify.ocr_result': 'OCR ({count} симв.): {preview}',
+        'notify.ocr_error': 'Ошибка OCR: {error}',
+        'notify.prefix_set': 'Префикс: {prefix}_…',
+        'notify.prefix_cleared': 'Префикс сброшен',
+        'notify.autoresize_on': 'Авторесайз: включён',
+        'notify.autoresize_off': 'Авторесайз: выключен',
+        'notify.autostart_on': 'Автозапуск: включён',
+        'notify.autostart_off': 'Автозапуск: выключен',
+        'notify.log_empty': 'Лог пуст — ошибок не было',
+        'notify.language_changed': 'Язык: Русский',
+        'msg.already_running': 'Скриншот-хелпер уже запущен — посмотри иконку в трее.',
+        'dialog.save_title': 'Сохранить скриншот как...',
+        'dialog.prefix_title': 'Префикс имени скриншотов',
+        'dialog.prefix_prompt': "Префикс для имён файлов (пусто = вернуть '{default}'):",
+        'default.filename_base': 'Снимок',
+        'menu.title': 'Скриншот-хелпер',
+        'menu.hotkey_dialog': 'Ctrl+Alt+S — сохранить через диалог',
+        'menu.hotkey_quick': 'Ctrl+Alt+Shift+S — быстро в Pictures\\Screenshots',
+        'menu.hotkey_area': 'Ctrl+Alt+A — захват области экрана',
+        'menu.hotkey_ocr': 'Ctrl+Alt+D — OCR (текст из картинки в буфере)',
+        'menu.prefix_none': 'Префикс имени: (нет)',
+        'menu.prefix': 'Префикс имени: {value}',
+        'menu.autoresize': 'Авторесайз больших (>{px}px)',
+        'menu.autostart': 'Автозапуск с Windows',
+        'menu.open_folder': 'Открыть папку скриншотов',
+        'menu.open_log': 'Открыть лог ошибок',
+        'menu.language': 'Язык',
+        'menu.exit': 'Выход',
+    },
+}
+
 MAX_DIMENSION = 1920  # auto-resize: longest side won't exceed this
 AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_NAME = "ScreenshotToTerminal"
@@ -89,6 +166,32 @@ def set_config(key: str, value) -> None:
     cfg = _load_config()
     cfg[key] = value
     _save_config()
+
+
+# ============================================================
+# Локализация
+# ============================================================
+def get_language() -> str:
+    lang = get_config("language", DEFAULT_LANGUAGE)
+    if isinstance(lang, str) and lang in I18N:
+        return lang
+    return DEFAULT_LANGUAGE
+
+
+def set_language(code: str) -> None:
+    if code in I18N:
+        set_config("language", code)
+
+
+def t(key: str, **kwargs) -> str:
+    table = I18N.get(get_language()) or I18N[DEFAULT_LANGUAGE]
+    template = table.get(key) or I18N[DEFAULT_LANGUAGE].get(key) or key
+    if kwargs:
+        try:
+            return template.format(**kwargs)
+        except Exception:
+            return template
+    return template
 
 
 # ============================================================
@@ -205,7 +308,7 @@ def _sanitize_prefix(s: str) -> str:
 def _generate_filename(extension: str = ".jpeg") -> str:
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
     prefix = _sanitize_prefix(get_config("filename_prefix", "") or "")
-    base = prefix if prefix else "Снимок"
+    base = prefix if prefix else t('default.filename_base')
     return f"{base}_{timestamp}{extension}"
 
 
@@ -224,7 +327,7 @@ def _save_image(image: Image.Image, filepath: str) -> Image.Image:
 
 def save_screenshot_with_dialog() -> None:
     if not clipboard_has_image():
-        notify("В буфере нет картинки")
+        notify(t('notify.no_clipboard_image'))
         return
 
     try:
@@ -254,7 +357,7 @@ def save_screenshot_with_dialog() -> None:
 
         try:
             filepath = filedialog.asksaveasfilename(
-                title="Сохранить скриншот как...",
+                title=t('dialog.save_title'),
                 initialdir=last_dir,
                 initialfile=initial_filename,
                 defaultextension=".jpeg",
@@ -272,14 +375,14 @@ def save_screenshot_with_dialog() -> None:
         saved = _save_image(image, filepath)
         save_last_dir(os.path.dirname(filepath))
         set_clipboard_image_and_text(saved, filepath)
-        notify(f"Сохранено: {os.path.basename(filepath)}")
+        notify(t('notify.saved', name=os.path.basename(filepath)))
     except Exception as e:
         log_error(f"save_screenshot_with_dialog: {e}")
 
 
 def save_screenshot_quick() -> None:
     if not clipboard_has_image():
-        notify("В буфере нет картинки")
+        notify(t('notify.no_clipboard_image'))
         return
 
     try:
@@ -293,7 +396,7 @@ def save_screenshot_quick() -> None:
 
         saved = _save_image(image, filepath)
         set_clipboard_image_and_text(saved, filepath)
-        notify(f"Быстро сохранено: {filename}")
+        notify(t('notify.quick_saved', name=filename))
     except Exception as e:
         log_error(f"save_screenshot_quick: {e}")
 
@@ -431,7 +534,7 @@ def save_screenshot_area() -> None:
 
         saved = _save_image(image, filepath)
         set_clipboard_image_and_text(saved, filepath)
-        notify(f"Область сохранена: {filename}")
+        notify(t('notify.area_saved', name=filename))
     except Exception as e:
         log_error(f"save_screenshot_area: {e}")
 
@@ -507,7 +610,7 @@ def ocr_pil_image(pil_image: Image.Image) -> str:
 
 def ocr_from_clipboard() -> None:
     if not clipboard_has_image():
-        notify("В буфере нет картинки")
+        notify(t('notify.no_clipboard_image'))
         return
     try:
         image = ImageGrab.grabclipboard()
@@ -515,16 +618,16 @@ def ocr_from_clipboard() -> None:
             return
         text = ocr_pil_image(image)
         if not text:
-            notify("Текст не найден")
+            notify(t('notify.no_text'))
             return
         set_clipboard_text(text)
         preview = text[:60].replace('\n', ' ').replace('\r', ' ')
         if len(text) > 60:
             preview += '…'
-        notify(f"OCR ({len(text)} симв.): {preview}")
+        notify(t('notify.ocr_result', count=len(text), preview=preview))
     except Exception as e:
         log_error(f"ocr_from_clipboard: {e}")
-        notify(f"Ошибка OCR: {e}")
+        notify(t('notify.ocr_error', error=e))
 
 
 # ============================================================
@@ -537,8 +640,8 @@ def show_prefix_dialog() -> None:
     try:
         current = get_config("filename_prefix", "") or ""
         new_value = simpledialog.askstring(
-            "Префикс имени скриншотов",
-            "Префикс для имён файлов (пусто = вернуть 'Снимок'):",
+            t('dialog.prefix_title'),
+            t('dialog.prefix_prompt', default=t('default.filename_base')),
             initialvalue=current,
             parent=root,
         )
@@ -554,9 +657,9 @@ def show_prefix_dialog() -> None:
     cleaned = _sanitize_prefix(new_value)
     set_config("filename_prefix", cleaned)
     if cleaned:
-        notify(f"Префикс: {cleaned}_…")
+        notify(t('notify.prefix_set', prefix=cleaned))
     else:
-        notify("Префикс сброшен")
+        notify(t('notify.prefix_cleared'))
 
 
 # ============================================================
@@ -666,7 +769,7 @@ def menu_open_log(icon, item):
         if os.path.exists(LOG_FILE):
             os.startfile(LOG_FILE)
         else:
-            notify("Лог пуст — ошибок не было")
+            notify(t('notify.log_empty'))
     except Exception as e:
         log_error(f"open_log: {e}")
 
@@ -674,7 +777,7 @@ def menu_open_log(icon, item):
 def menu_toggle_resize(icon, item):
     new_value = not get_config("auto_resize", True)
     set_config("auto_resize", new_value)
-    notify(f"Авторесайз: {'включён' if new_value else 'выключен'}")
+    notify(t('notify.autoresize_on' if new_value else 'notify.autoresize_off'))
 
 
 def menu_set_prefix(icon, item):
@@ -684,15 +787,26 @@ def menu_set_prefix(icon, item):
 def _prefix_menu_text(item) -> str:
     p = get_config("filename_prefix", "") or ""
     if not p:
-        return "Префикс имени: (нет)"
+        return t('menu.prefix_none')
     shown = p if len(p) <= 25 else p[:22] + '…'
-    return f"Префикс имени: {shown}"
+    return t('menu.prefix', value=shown)
 
 
 def menu_toggle_autostart(icon, item):
     new_value = not is_autostart_enabled()
     set_autostart(new_value)
-    notify(f"Автозапуск: {'включён' if new_value else 'выключен'}")
+    notify(t('notify.autostart_on' if new_value else 'notify.autostart_off'))
+
+
+def _make_language_setter(code: str):
+    def setter(icon, item):
+        set_language(code)
+        try:
+            icon.update_menu()
+        except Exception:
+            pass
+        notify(t('notify.language_changed'))
+    return setter
 
 
 def menu_exit(icon, item):
@@ -707,31 +821,45 @@ def menu_exit(icon, item):
         pass
 
 
+def _build_language_menu() -> pystray.Menu:
+    items = []
+    for code, table in I18N.items():
+        label = table.get('lang.name', code)
+        items.append(pystray.MenuItem(
+            label,
+            _make_language_setter(code),
+            radio=True,
+            checked=(lambda c: lambda item: get_language() == c)(code),
+        ))
+    return pystray.Menu(*items)
+
+
 def build_menu():
     return pystray.Menu(
-        pystray.MenuItem('Скриншот-хелпер', None, enabled=False),
+        pystray.MenuItem(lambda item: t('menu.title'), None, enabled=False),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem('Ctrl+Alt+S — сохранить через диалог', None, enabled=False),
-        pystray.MenuItem('Ctrl+Alt+Shift+S — быстро в Pictures\\Screenshots', None, enabled=False),
-        pystray.MenuItem('Ctrl+Alt+A — захват области экрана', None, enabled=False),
-        pystray.MenuItem('Ctrl+Alt+D — OCR (текст из картинки в буфере)', None, enabled=False),
+        pystray.MenuItem(lambda item: t('menu.hotkey_dialog'), None, enabled=False),
+        pystray.MenuItem(lambda item: t('menu.hotkey_quick'), None, enabled=False),
+        pystray.MenuItem(lambda item: t('menu.hotkey_area'), None, enabled=False),
+        pystray.MenuItem(lambda item: t('menu.hotkey_ocr'), None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(_prefix_menu_text, menu_set_prefix),
         pystray.MenuItem(
-            f'Авторесайз больших (>{MAX_DIMENSION}px)',
+            lambda item: t('menu.autoresize', px=MAX_DIMENSION),
             menu_toggle_resize,
             checked=lambda item: get_config("auto_resize", True),
         ),
         pystray.MenuItem(
-            'Автозапуск с Windows',
+            lambda item: t('menu.autostart'),
             menu_toggle_autostart,
             checked=lambda item: is_autostart_enabled(),
         ),
+        pystray.MenuItem(lambda item: t('menu.language'), _build_language_menu()),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem('Открыть папку скриншотов', menu_open_screenshots, default=True),
-        pystray.MenuItem('Открыть лог ошибок', menu_open_log),
+        pystray.MenuItem(lambda item: t('menu.open_folder'), menu_open_screenshots, default=True),
+        pystray.MenuItem(lambda item: t('menu.open_log'), menu_open_log),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem('Выход', menu_exit),
+        pystray.MenuItem(lambda item: t('menu.exit'), menu_exit),
     )
 
 
@@ -755,7 +883,7 @@ def main() -> None:
     if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
         ctypes.windll.user32.MessageBoxW(
             0,
-            "Скриншот-хелпер уже запущен — посмотри иконку в трее.",
+            t('msg.already_running'),
             APP_TITLE,
             0x40,
         )
