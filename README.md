@@ -41,6 +41,7 @@ Or use `Ctrl+Alt+D` to send pure text via OCR — saves tokens, avoids the model
 - **PNG or JPEG** — saves as PNG by default; switch to JPEG anytime from the tray menu (**Save format**)
 - **Custom filename prefix** per project — set `bugfix-auth` and your shots become `bugfix-auth_2026-05-18_14-22-01.png`
 - **Auto-resize** large screenshots down to 1920 px on the longest side (saves tokens and disk)
+- **10-language UI** — English, Русский, 中文, 日本語, Deutsch, Italiano, Español, Français, Português, 한국어 (switch from the tray menu)
 - **Remembers last-used folder**, runs in system tray, single-instance protection, one-click autostart toggle
 
 ---
