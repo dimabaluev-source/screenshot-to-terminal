@@ -92,8 +92,10 @@ Typical flow: use the built-in **`Win+Shift+S`** to copy a region to clipboard, 
 Right-click the blue **S** icon:
 
 - **Filename prefix** — per-project tagging (e.g. `bugfix-auth`)
+- **Save format** — choose **PNG** (default) or **JPEG**
 - **Auto-resize toggle** — on/off
 - **Autostart with Windows** — uses `HKCU\...\Run`, fully reversible
+- **Language** — English / Русский
 - **Open screenshots folder** / **Open error log**
 - **Exit** — the proper way to shut down (don't use Task Manager)
 
