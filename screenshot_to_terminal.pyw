@@ -61,6 +61,7 @@ I18N = {
         'notify.autoresize_off': 'Auto-resize: off',
         'notify.autostart_on': 'Autostart: on',
         'notify.autostart_off': 'Autostart: off',
+        'notify.format_changed': 'Format: {fmt}',
         'notify.log_empty': 'Log is empty — no errors yet',
         'notify.language_changed': 'Language: English',
         'msg.already_running': 'Screenshot helper is already running — check the tray icon.',
@@ -77,6 +78,7 @@ I18N = {
         'menu.prefix': 'Filename prefix: {value}',
         'menu.autoresize': 'Auto-resize large (>{px}px)',
         'menu.autostart': 'Autostart with Windows',
+        'menu.format': 'Save format',
         'menu.open_folder': 'Open screenshots folder',
         'menu.open_log': 'Open error log',
         'menu.language': 'Language',
@@ -97,6 +99,7 @@ I18N = {
         'notify.autoresize_off': 'Авторесайз: выключен',
         'notify.autostart_on': 'Автозапуск: включён',
         'notify.autostart_off': 'Автозапуск: выключен',
+        'notify.format_changed': 'Формат: {fmt}',
         'notify.log_empty': 'Лог пуст — ошибок не было',
         'notify.language_changed': 'Язык: Русский',
         'msg.already_running': 'Скриншот-хелпер уже запущен — посмотри иконку в трее.',
@@ -113,6 +116,7 @@ I18N = {
         'menu.prefix': 'Префикс имени: {value}',
         'menu.autoresize': 'Авторесайз больших (>{px}px)',
         'menu.autostart': 'Автозапуск с Windows',
+        'menu.format': 'Формат сохранения',
         'menu.open_folder': 'Открыть папку скриншотов',
         'menu.open_log': 'Открыть лог ошибок',
         'menu.language': 'Язык',
@@ -123,6 +127,8 @@ I18N = {
 MAX_DIMENSION = 1920  # auto-resize: longest side won't exceed this
 AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_NAME = "ScreenshotToTerminal"
+
+DEFAULT_FORMAT = 'png'  # default save format (png / jpeg)
 
 
 # ============================================================
@@ -166,6 +172,15 @@ def set_config(key: str, value) -> None:
     cfg = _load_config()
     cfg[key] = value
     _save_config()
+
+
+def get_format() -> str:
+    fmt = get_config("image_format", DEFAULT_FORMAT)
+    return fmt if fmt in ('png', 'jpeg') else DEFAULT_FORMAT
+
+
+def _default_extension() -> str:
+    return '.png' if get_format() == 'png' else '.jpeg'
 
 
 # ============================================================
@@ -305,7 +320,9 @@ def _sanitize_prefix(s: str) -> str:
     return cleaned[:60]
 
 
-def _generate_filename(extension: str = ".jpeg") -> str:
+def _generate_filename(extension: str = None) -> str:
+    if extension is None:
+        extension = _default_extension()
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
     prefix = _sanitize_prefix(get_config("filename_prefix", "") or "")
     base = prefix if prefix else t('default.filename_base')
@@ -340,28 +357,25 @@ def save_screenshot_with_dialog() -> None:
         if not os.path.isdir(last_dir):
             last_dir = DEFAULT_SCREENSHOTS_DIR
 
-        initial_filename = _generate_filename(".jpeg")
+        initial_filename = _generate_filename()
+
+        # Тип файла в диалоге: выбранный формат идёт первым (по умолчанию)
+        png_ft = ("PNG Image", "*.png")
+        jpeg_ft = ("JPEG Image", "*.jpeg")
+        ordered = [png_ft, jpeg_ft] if get_format() == 'png' else [jpeg_ft, png_ft]
+        filetypes = ordered + [("All files", "*.*")]
 
         root = tk.Tk()
         root.withdraw()
         root.attributes('-topmost', True)
-
-        def select_filename_in_dialog():
-            time.sleep(0.35)
-            try:
-                keyboard.send('ctrl+a')
-            except Exception as e:
-                log_error(f"select_filename: {e}")
-
-        threading.Thread(target=select_filename_in_dialog, daemon=True).start()
 
         try:
             filepath = filedialog.asksaveasfilename(
                 title=t('dialog.save_title'),
                 initialdir=last_dir,
                 initialfile=initial_filename,
-                defaultextension=".jpeg",
-                filetypes=[("JPEG Image", "*.jpeg"), ("PNG Image", "*.png"), ("All files", "*.*")]
+                defaultextension=_default_extension(),
+                filetypes=filetypes,
             )
         finally:
             try:
@@ -391,7 +405,7 @@ def save_screenshot_quick() -> None:
             return
 
         os.makedirs(DEFAULT_SCREENSHOTS_DIR, exist_ok=True)
-        filename = _generate_filename(".jpeg")
+        filename = _generate_filename()
         filepath = os.path.join(DEFAULT_SCREENSHOTS_DIR, filename)
 
         saved = _save_image(image, filepath)
@@ -405,7 +419,14 @@ def save_screenshot_quick() -> None:
 # Захват области экрана через overlay
 # ============================================================
 def _capture_screen_area_bbox():
-    """Spotlight-overlay: затемняем экран, область под курсором — без затемнения. Возвращает (x1, y1, x2, y2) или None."""
+    """Spotlight-overlay: затемняем экран, область под курсором — без затемнения. Возвращает (x1, y1, x2, y2) или None.
+
+    Производительность: затемнённый скриншот рисуется фоном ОДИН раз, а область
+    выделения делается прозрачной через -transparentcolor (там виден живой экран
+    на полной яркости). Прозрачный прямоугольник двигается через canvas.coords()
+    по сплошной заливке — без stipple и без PIL-операций на кадр — поэтому плавно
+    даже на 4K. Обновления коалесцируются до ~60fps.
+    """
     user32 = ctypes.windll.user32
     virtual_x = user32.GetSystemMetrics(76)
     virtual_y = user32.GetSystemMetrics(77)
@@ -419,75 +440,79 @@ def _capture_screen_area_bbox():
     )
     dim = ImageEnhance.Brightness(bright).enhance(0.5)
 
+    # Magic-цвет для прозрачной «дырки». enhance(0.5) не даёт каналам значение
+    # 255, поэтому #ff00ff гарантированно отсутствует в затемнённом фоне.
+    MAGIC = '#ff00ff'
+
     root = tk.Tk()
     root.attributes('-topmost', True)
     root.overrideredirect(True)
     root.geometry(f"{virtual_w}x{virtual_h}+{virtual_x}+{virtual_y}")
     root.configure(cursor='crosshair')
+    try:
+        root.attributes('-transparentcolor', MAGIC)
+    except Exception:
+        pass
 
-    canvas = tk.Canvas(root, highlightthickness=0, borderwidth=0)
+    canvas = tk.Canvas(root, highlightthickness=0, borderwidth=0, bg='black',
+                       width=virtual_w, height=virtual_h)
     canvas.pack(fill='both', expand=True)
 
+    # Фон — затемнённый скриншот целиком, конвертируется в PhotoImage один раз
     dim_tk = ImageTk.PhotoImage(dim)
     canvas.create_image(0, 0, anchor='nw', image=dim_tk)
-    # Держим ссылку, иначе сборщик уберёт изображение
-    canvas._dim_ref = dim_tk
+    canvas._dim_ref = dim_tk  # держим ссылку, иначе сборщик уберёт
 
-    state = {
-        'start': None,        # (screen_x, screen_y) — глобальные координаты
-        'bright_id': None,    # id яркого фрагмента в canvas
-        'rect_id': None,      # id красной рамки
-        'bright_tk': None,    # держим ссылку на PhotoImage
-        'pending_after': None,
-        'bbox': None,
-    }
+    # «Дырка» (прозрачная область) + красная рамка поверх неё
+    hole = canvas.create_rectangle(0, 0, 0, 0, fill=MAGIC, outline='', width=0)
+    sel_rect = canvas.create_rectangle(0, 0, 0, 0, outline='red', width=2)
 
-    def update_selection_canvas_coords(cx1, cy1, cx2, cy2):
+    state = {'start': None, 'bbox': None, 'after_id': None, 'last': None}
+
+    def set_selection(cx1, cy1, cx2, cy2):
         cx1, cx2 = sorted((cx1, cx2))
         cy1, cy2 = sorted((cy1, cy2))
         cx1 = max(0, min(virtual_w, cx1))
         cy1 = max(0, min(virtual_h, cy1))
         cx2 = max(0, min(virtual_w, cx2))
         cy2 = max(0, min(virtual_h, cy2))
-        if cx2 - cx1 < 1 or cy2 - cy1 < 1:
-            return
+        canvas.coords(hole, cx1, cy1, cx2, cy2)
+        canvas.coords(sel_rect, cx1, cy1, cx2, cy2)
 
-        if state['bright_id'] is not None:
-            canvas.delete(state['bright_id'])
-        if state['rect_id'] is not None:
-            canvas.delete(state['rect_id'])
+    def _apply_pending():
+        state['after_id'] = None
+        if state['last'] is not None:
+            set_selection(*state['last'])
 
-        cropped = bright.crop((cx1, cy1, cx2, cy2))
-        state['bright_tk'] = ImageTk.PhotoImage(cropped)
-        state['bright_id'] = canvas.create_image(
-            cx1, cy1, anchor='nw', image=state['bright_tk']
-        )
-        state['rect_id'] = canvas.create_rectangle(
-            cx1, cy1, cx2, cy2, outline='red', width=2
-        )
-
-    def schedule_update(x_root, y_root):
-        # Throttle: пересчитываем не чаще ~30 fps
-        if state['pending_after'] is not None:
-            return
-        sx, sy = state['start']
-        cx1 = sx - virtual_x
-        cy1 = sy - virtual_y
-        cx2 = x_root - virtual_x
-        cy2 = y_root - virtual_y
-
-        def do_update():
-            state['pending_after'] = None
-            update_selection_canvas_coords(cx1, cy1, cx2, cy2)
-
-        state['pending_after'] = canvas.after(30, do_update)
+    def finish(bbox):
+        state['bbox'] = bbox
+        if state['after_id'] is not None:
+            try:
+                canvas.after_cancel(state['after_id'])
+            except Exception:
+                pass
+            state['after_id'] = None
+        try:
+            root.grab_release()
+        except Exception:
+            pass
+        try:
+            root.quit()  # завершает mainloop; destroy — после него
+        except Exception:
+            pass
 
     def on_press(event):
         state['start'] = (event.x_root, event.y_root)
 
     def on_drag(event):
-        if state['start']:
-            schedule_update(event.x_root, event.y_root)
+        if not state['start']:
+            return
+        sx, sy = state['start']
+        # Запоминаем последнюю позицию; применяем не чаще ~60fps (коалесцируем)
+        state['last'] = (sx - virtual_x, sy - virtual_y,
+                         event.x_root - virtual_x, event.y_root - virtual_y)
+        if state['after_id'] is None:
+            state['after_id'] = canvas.after(16, _apply_pending)
 
     def on_release(event):
         if state['start']:
@@ -496,25 +521,41 @@ def _capture_screen_area_bbox():
             x2 = max(state['start'][0], event.x_root)
             y2 = max(state['start'][1], event.y_root)
             if (x2 - x1) > 5 and (y2 - y1) > 5:
-                state['bbox'] = (x1, y1, x2, y2)
-        try:
-            root.destroy()
-        except Exception:
-            pass
+                finish((x1, y1, x2, y2))
+                return
+        finish(None)
 
-    def on_escape(event):
-        state['bbox'] = None
-        try:
-            root.destroy()
-        except Exception:
-            pass
+    def on_cancel(event=None):
+        finish(None)
 
     canvas.bind('<ButtonPress-1>', on_press)
     canvas.bind('<B1-Motion>', on_drag)
     canvas.bind('<ButtonRelease-1>', on_release)
-    root.bind('<Escape>', on_escape)
+    canvas.bind('<ButtonPress-3>', on_cancel)  # правый клик — отмена
+    root.bind('<Escape>', on_cancel)
+    root.protocol('WM_DELETE_WINDOW', on_cancel)
+
+    # Фокус и захват ввода — чтобы Escape гарантированно срабатывал и mainloop
+    # всегда мог завершиться (иначе worker-поток мог зависнуть навсегда).
+    try:
+        root.update_idletasks()  # окно должно быть отображено до focus/grab
+    except Exception:
+        pass
+    try:
+        root.focus_force()
+        canvas.focus_set()
+    except Exception:
+        pass
+    try:
+        root.grab_set()
+    except Exception:
+        pass
 
     root.mainloop()
+    try:
+        root.destroy()
+    except Exception:
+        pass
     return state['bbox']
 
 
@@ -529,7 +570,7 @@ def save_screenshot_area() -> None:
             return
 
         os.makedirs(DEFAULT_SCREENSHOTS_DIR, exist_ok=True)
-        filename = _generate_filename(".jpeg")
+        filename = _generate_filename()
         filepath = os.path.join(DEFAULT_SCREENSHOTS_DIR, filename)
 
         saved = _save_image(image, filepath)
@@ -809,6 +850,30 @@ def _make_language_setter(code: str):
     return setter
 
 
+def _make_format_setter(fmt: str):
+    def setter(icon, item):
+        set_config("image_format", fmt)
+        try:
+            icon.update_menu()
+        except Exception:
+            pass
+        notify(t('notify.format_changed', fmt=fmt.upper()))
+    return setter
+
+
+def _build_format_menu() -> pystray.Menu:
+    return pystray.Menu(
+        pystray.MenuItem(
+            'PNG', _make_format_setter('png'),
+            radio=True, checked=lambda item: get_format() == 'png',
+        ),
+        pystray.MenuItem(
+            'JPEG', _make_format_setter('jpeg'),
+            radio=True, checked=lambda item: get_format() == 'jpeg',
+        ),
+    )
+
+
 def menu_exit(icon, item):
     stop_event.set()
     try:
@@ -844,6 +909,7 @@ def build_menu():
         pystray.MenuItem(lambda item: t('menu.hotkey_ocr'), None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(_prefix_menu_text, menu_set_prefix),
+        pystray.MenuItem(lambda item: t('menu.format'), _build_format_menu()),
         pystray.MenuItem(
             lambda item: t('menu.autoresize', px=MAX_DIMENSION),
             menu_toggle_resize,

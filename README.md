@@ -38,7 +38,8 @@ Or use `Ctrl+Alt+D` to send pure text via OCR — saves tokens, avoids the model
   - `Ctrl+Alt+A` — built-in area selector with a Snipping-Tool-style spotlight overlay
 - **`Ctrl+Alt+D` — OCR** the clipboard image to text using Windows.Media.Ocr (offline, multi-language)
 - **Dual-format clipboard**: every save puts both the image AND its file path into the clipboard simultaneously. Paste into a terminal → get the path. Paste into Paint → get the image.
-- **Custom filename prefix** per project — set `bugfix-auth` and your shots become `bugfix-auth_2026-05-18_14-22-01.jpeg`
+- **PNG or JPEG** — saves as PNG by default; switch to JPEG anytime from the tray menu (**Save format**)
+- **Custom filename prefix** per project — set `bugfix-auth` and your shots become `bugfix-auth_2026-05-18_14-22-01.png`
 - **Auto-resize** large screenshots down to 1920 px on the longest side (saves tokens and disk)
 - **Remembers last-used folder**, runs in system tray, single-instance protection, one-click autostart toggle
 
