@@ -95,7 +95,7 @@ Right-click the blue **S** icon:
 - **Save format** — choose **PNG** (default) or **JPEG**
 - **Auto-resize toggle** — on/off
 - **Autostart with Windows** — uses `HKCU\...\Run`, fully reversible
-- **Language** — English / Русский
+- **Language** — 10 UI languages: English, Русский, 中文, 日本語, Deutsch, Italiano, Español, Français, Português, 한국어 _(UI only — OCR languages depend on your installed Windows packs)_
 - **Open screenshots folder** / **Open error log**
 - **Exit** — the proper way to shut down (don't use Task Manager)
 
