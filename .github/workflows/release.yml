@@ -1,0 +1,76 @@
+name: Build and publish release
+
+# Ставим тег — получаем готовый .exe в Releases. Большинству пользователей
+# не нужно ставить Python и ждать, пока winsdk соберёт нативные привязки.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:  # можно собрать вручную, не создавая тег
+
+permissions:
+  contents: write  # нужно, чтобы приложить артефакт к релизу
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build executable
+        run: >
+          pyinstaller
+          --noconfirm
+          --noconsole
+          --onedir
+          --name ScreenshotToTerminal
+          screenshot_to_terminal.pyw
+
+      - name: Smoke-check the build
+        shell: pwsh
+        run: |
+          $exe = "dist/ScreenshotToTerminal/ScreenshotToTerminal.exe"
+          if (-not (Test-Path $exe)) { throw "Executable was not produced" }
+          # Приложение живёт в трее и само не завершается, поэтому просто
+          # убеждаемся, что процесс поднимается и не падает сразу.
+          $p = Start-Process $exe -PassThru
+          Start-Sleep -Seconds 20
+          if ($p.HasExited) { throw "App exited immediately with code $($p.ExitCode)" }
+          Stop-Process -Id $p.Id -Force
+          Write-Host "Started and stayed alive - OK"
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}"
+          Compress-Archive -Path dist/ScreenshotToTerminal/* `
+                           -DestinationPath "ScreenshotToTerminal-$version-win64.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScreenshotToTerminal-win64
+          path: ScreenshotToTerminal-*-win64.zip
+
+      - name: Publish to Releases
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ScreenshotToTerminal-*-win64.zip
+          generate_release_notes: true
+          body: |
+            Unzip anywhere and run `ScreenshotToTerminal.exe` — no Python needed.
+
+            OCR (`Ctrl+Alt+D`) additionally needs the Windows language packs
+            for the languages you want to recognize: see INSTALL_OCR.md.

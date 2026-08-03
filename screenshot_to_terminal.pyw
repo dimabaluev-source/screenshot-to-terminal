@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import sys
 import time
 import json
@@ -9,6 +10,7 @@ import threading
 import ctypes
 import winreg
 import keyboard
+from keyboard import _winkeyboard
 import pystray
 from PIL import Image, ImageDraw, ImageFont, ImageGrab, ImageEnhance, ImageTk
 import win32clipboard
@@ -33,12 +35,33 @@ APP_DATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), 
 CONFIG_FILE = os.path.join(APP_DATA_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DATA_DIR, "error.log")
 
+# Значения по умолчанию — их можно переопределить из трея (Hotkeys),
+# выбор сохраняется в config.json и переживает обновление скрипта.
 HOTKEY_DIALOG = 'ctrl+alt+s'
 HOTKEY_QUICK = 'ctrl+alt+shift+s'
 HOTKEY_AREA = 'ctrl+alt+a'
 HOTKEY_OCR = 'ctrl+alt+d'
 
-OCR_LANGUAGES = ('ru-RU', 'en-US')
+HOTKEY_DEFAULTS = {
+    'dialog': HOTKEY_DIALOG,
+    'quick': HOTKEY_QUICK,
+    'area': HOTKEY_AREA,
+    'ocr': HOTKEY_OCR,
+}
+
+# Фоллбэк, если система почему-то не отдала список установленных движков OCR
+OCR_LANGUAGES = ('en-US', 'ru')
+MAX_OCR_ENGINES = 3  # каждый лишний движок — лишний прогон распознавания
+
+# Лог: чтобы не рос бесконечно, при переполнении уезжает в .1
+LOG_MAX_BYTES = 512 * 1024
+
+# Автоудаление старых снимков (0 = выключено)
+CLEANUP_CHOICES = (0, 7, 30, 90)
+CLEANUP_INTERVAL = 6 * 3600
+# Трогаем только файлы, которые сделала сама программа: prefix_ГГГГ-ММ-ДД_ЧЧ-ММ-СС.ext
+SCREENSHOT_NAME_RE = re.compile(
+    r'^.+_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.(png|jpe?g)$', re.IGNORECASE)
 
 MUTEX_NAME = "ScreenshotToTerminal_SingleInstance_Mutex"
 APP_TITLE = "Screenshot to Terminal"
@@ -70,10 +93,6 @@ I18N = {
         'dialog.prefix_prompt': "Filename prefix (empty = use default '{default}'):",
         'default.filename_base': 'Screenshot',
         'menu.title': 'Screenshot Helper',
-        'menu.hotkey_dialog': 'Ctrl+Alt+S — save via dialog',
-        'menu.hotkey_quick': 'Ctrl+Alt+Shift+S — quick save to Pictures\\Screenshots',
-        'menu.hotkey_area': 'Ctrl+Alt+A — capture screen area',
-        'menu.hotkey_ocr': 'Ctrl+Alt+D — OCR (text from clipboard image)',
         'menu.prefix_none': 'Filename prefix: (none)',
         'menu.prefix': 'Filename prefix: {value}',
         'menu.autoresize': 'Auto-resize large (>{px}px)',
@@ -83,6 +102,22 @@ I18N = {
         'menu.open_log': 'Open error log',
         'menu.language': 'Language',
         'menu.exit': 'Exit',
+        'menu.hotkeys': 'Hotkeys',
+        'action.dialog': 'Save via dialog',
+        'action.quick': 'Quick save',
+        'action.area': 'Capture area',
+        'action.ocr': 'OCR',
+        'dialog.hotkey_title': 'Change hotkey',
+        'dialog.hotkey_prompt': 'Hotkey for "{action}".\nFor example: ctrl+alt+a',
+        'notify.hotkey_set': 'Hotkey: {key}',
+        'notify.hotkey_invalid': 'Not a valid hotkey: {key}',
+        'notify.hotkey_conflict': '{key} is already taken by another app — it may not work',
+        'notify.hotkey_failed': 'Could not bind {key}',
+        'menu.cleanup': 'Delete old screenshots',
+        'menu.cleanup_never': 'Never',
+        'menu.cleanup_days': 'Older than {days} days',
+        'notify.cleanup_on': 'Cleanup: older than {days} days (removed now: {count})',
+        'notify.cleanup_off': 'Cleanup: off',
     },
     'ru': {
         'lang.name': 'Русский',
@@ -108,10 +143,6 @@ I18N = {
         'dialog.prefix_prompt': "Префикс для имён файлов (пусто = вернуть '{default}'):",
         'default.filename_base': 'Снимок',
         'menu.title': 'Скриншот-хелпер',
-        'menu.hotkey_dialog': 'Ctrl+Alt+S — сохранить через диалог',
-        'menu.hotkey_quick': 'Ctrl+Alt+Shift+S — быстро в Pictures\\Screenshots',
-        'menu.hotkey_area': 'Ctrl+Alt+A — захват области экрана',
-        'menu.hotkey_ocr': 'Ctrl+Alt+D — OCR (текст из картинки в буфере)',
         'menu.prefix_none': 'Префикс имени: (нет)',
         'menu.prefix': 'Префикс имени: {value}',
         'menu.autoresize': 'Авторесайз больших (>{px}px)',
@@ -121,6 +152,22 @@ I18N = {
         'menu.open_log': 'Открыть лог ошибок',
         'menu.language': 'Язык',
         'menu.exit': 'Выход',
+        'menu.hotkeys': 'Горячие клавиши',
+        'action.dialog': 'Сохранить через диалог',
+        'action.quick': 'Быстрое сохранение',
+        'action.area': 'Захват области',
+        'action.ocr': 'OCR',
+        'dialog.hotkey_title': 'Смена горячей клавиши',
+        'dialog.hotkey_prompt': 'Комбинация для «{action}».\nНапример: ctrl+alt+a',
+        'notify.hotkey_set': 'Горячая клавиша: {key}',
+        'notify.hotkey_invalid': 'Не похоже на комбинацию: {key}',
+        'notify.hotkey_conflict': '{key} уже занята другой программой — может не сработать',
+        'notify.hotkey_failed': 'Не удалось назначить {key}',
+        'menu.cleanup': 'Удалять старые снимки',
+        'menu.cleanup_never': 'Никогда',
+        'menu.cleanup_days': 'Старше {days} дней',
+        'notify.cleanup_on': 'Очистка: старше {days} дней (удалено сейчас: {count})',
+        'notify.cleanup_off': 'Очистка: выключена',
     },
     'zh': {
         'lang.name': '中文',
@@ -146,10 +193,6 @@ I18N = {
         'dialog.prefix_prompt': "文件名前缀（留空 = 使用默认 '{default}'）：",
         'default.filename_base': '截图',
         'menu.title': '截图助手',
-        'menu.hotkey_dialog': 'Ctrl+Alt+S — 通过对话框保存',
-        'menu.hotkey_quick': 'Ctrl+Alt+Shift+S — 快速保存到 Pictures\\Screenshots',
-        'menu.hotkey_area': 'Ctrl+Alt+A — 截取屏幕区域',
-        'menu.hotkey_ocr': 'Ctrl+Alt+D — OCR（从剪贴板图片提取文本）',
         'menu.prefix_none': '文件名前缀：（无）',
         'menu.prefix': '文件名前缀：{value}',
         'menu.autoresize': '自动缩放大图（>{px}px）',
@@ -159,6 +202,22 @@ I18N = {
         'menu.open_log': '打开错误日志',
         'menu.language': '语言',
         'menu.exit': '退出',
+        'menu.hotkeys': '快捷键',
+        'action.dialog': '通过对话框保存',
+        'action.quick': '快速保存',
+        'action.area': '截取区域',
+        'action.ocr': 'OCR',
+        'dialog.hotkey_title': '修改快捷键',
+        'dialog.hotkey_prompt': '“{action}”的快捷键。\n例如：ctrl+alt+a',
+        'notify.hotkey_set': '快捷键：{key}',
+        'notify.hotkey_invalid': '快捷键无效：{key}',
+        'notify.hotkey_conflict': '{key} 已被其他程序占用，可能无法生效',
+        'notify.hotkey_failed': '无法绑定 {key}',
+        'menu.cleanup': '删除旧截图',
+        'menu.cleanup_never': '从不',
+        'menu.cleanup_days': '超过 {days} 天',
+        'notify.cleanup_on': '清理：超过 {days} 天（本次删除 {count} 个）',
+        'notify.cleanup_off': '清理：已关闭',
     },
     'ja': {
         'lang.name': '日本語',
@@ -184,10 +243,6 @@ I18N = {
         'dialog.prefix_prompt': "ファイル名のプレフィックス（空 = デフォルト '{default}' を使用）：",
         'default.filename_base': 'スクリーンショット',
         'menu.title': 'スクリーンショットヘルパー',
-        'menu.hotkey_dialog': 'Ctrl+Alt+S — ダイアログで保存',
-        'menu.hotkey_quick': 'Ctrl+Alt+Shift+S — Pictures\\Screenshots にすぐ保存',
-        'menu.hotkey_area': 'Ctrl+Alt+A — 画面範囲をキャプチャ',
-        'menu.hotkey_ocr': 'Ctrl+Alt+D — OCR（クリップボード画像からテキスト）',
         'menu.prefix_none': 'ファイル名プレフィックス：（なし）',
         'menu.prefix': 'ファイル名プレフィックス：{value}',
         'menu.autoresize': '大きい画像を自動リサイズ（>{px}px）',
@@ -197,6 +252,22 @@ I18N = {
         'menu.open_log': 'エラーログを開く',
         'menu.language': '言語',
         'menu.exit': '終了',
+        'menu.hotkeys': 'ショートカットキー',
+        'action.dialog': 'ダイアログで保存',
+        'action.quick': 'クイック保存',
+        'action.area': '範囲をキャプチャ',
+        'action.ocr': 'OCR',
+        'dialog.hotkey_title': 'ショートカットキーの変更',
+        'dialog.hotkey_prompt': '「{action}」のショートカットキー。\n例: ctrl+alt+a',
+        'notify.hotkey_set': 'ショートカットキー: {key}',
+        'notify.hotkey_invalid': 'ショートカットキーが不正です: {key}',
+        'notify.hotkey_conflict': '{key} は他のアプリが使用中です — 動作しない場合があります',
+        'notify.hotkey_failed': '{key} を割り当てられませんでした',
+        'menu.cleanup': '古いスクリーンショットを削除',
+        'menu.cleanup_never': '削除しない',
+        'menu.cleanup_days': '{days} 日より前',
+        'notify.cleanup_on': 'クリーンアップ: {days} 日より前（今回 {count} 件削除）',
+        'notify.cleanup_off': 'クリーンアップ: オフ',
     },
     'de': {
         'lang.name': 'Deutsch',
@@ -222,10 +293,6 @@ I18N = {
         'dialog.prefix_prompt': "Dateinamen-Präfix (leer = Standard '{default}' verwenden):",
         'default.filename_base': 'Screenshot',
         'menu.title': 'Screenshot-Helfer',
-        'menu.hotkey_dialog': 'Ctrl+Alt+S — über Dialog speichern',
-        'menu.hotkey_quick': 'Ctrl+Alt+Shift+S — schnell in Pictures\\Screenshots',
-        'menu.hotkey_area': 'Ctrl+Alt+A — Bildschirmbereich erfassen',
-        'menu.hotkey_ocr': 'Ctrl+Alt+D — OCR (Text aus Bild in Zwischenablage)',
         'menu.prefix_none': 'Dateinamen-Präfix: (keins)',
         'menu.prefix': 'Dateinamen-Präfix: {value}',
         'menu.autoresize': 'Große automatisch verkleinern (>{px}px)',
@@ -235,6 +302,22 @@ I18N = {
         'menu.open_log': 'Fehlerprotokoll öffnen',
         'menu.language': 'Sprache',
         'menu.exit': 'Beenden',
+        'menu.hotkeys': 'Tastenkürzel',
+        'action.dialog': 'Über Dialog speichern',
+        'action.quick': 'Schnell speichern',
+        'action.area': 'Bereich aufnehmen',
+        'action.ocr': 'OCR',
+        'dialog.hotkey_title': 'Tastenkürzel ändern',
+        'dialog.hotkey_prompt': 'Tastenkürzel für „{action}“.\nZum Beispiel: ctrl+alt+a',
+        'notify.hotkey_set': 'Tastenkürzel: {key}',
+        'notify.hotkey_invalid': 'Kein gültiges Tastenkürzel: {key}',
+        'notify.hotkey_conflict': '{key} ist bereits von einer anderen App belegt — funktioniert evtl. nicht',
+        'notify.hotkey_failed': '{key} konnte nicht belegt werden',
+        'menu.cleanup': 'Alte Screenshots löschen',
+        'menu.cleanup_never': 'Nie',
+        'menu.cleanup_days': 'Älter als {days} Tage',
+        'notify.cleanup_on': 'Bereinigung: älter als {days} Tage (jetzt gelöscht: {count})',
+        'notify.cleanup_off': 'Bereinigung: aus',
     },
     'it': {
         'lang.name': 'Italiano',
@@ -260,10 +343,6 @@ I18N = {
         'dialog.prefix_prompt': "Prefisso del nome file (vuoto = usa predefinito '{default}'):",
         'default.filename_base': 'Screenshot',
         'menu.title': 'Screenshot Helper',
-        'menu.hotkey_dialog': 'Ctrl+Alt+S — salva tramite finestra',
-        'menu.hotkey_quick': 'Ctrl+Alt+Shift+S — salvataggio rapido in Pictures\\Screenshots',
-        'menu.hotkey_area': 'Ctrl+Alt+A — cattura area dello schermo',
-        'menu.hotkey_ocr': "Ctrl+Alt+D — OCR (testo dall'immagine negli appunti)",
         'menu.prefix_none': 'Prefisso nome file: (nessuno)',
         'menu.prefix': 'Prefisso nome file: {value}',
         'menu.autoresize': 'Ridimensiona immagini grandi (>{px}px)',
@@ -273,6 +352,22 @@ I18N = {
         'menu.open_log': 'Apri registro errori',
         'menu.language': 'Lingua',
         'menu.exit': 'Esci',
+        'menu.hotkeys': 'Scorciatoie',
+        'action.dialog': 'Salva tramite finestra',
+        'action.quick': 'Salvataggio rapido',
+        'action.area': 'Cattura area',
+        'action.ocr': 'OCR',
+        'dialog.hotkey_title': 'Cambia scorciatoia',
+        'dialog.hotkey_prompt': 'Scorciatoia per "{action}".\nAd esempio: ctrl+alt+a',
+        'notify.hotkey_set': 'Scorciatoia: {key}',
+        'notify.hotkey_invalid': 'Scorciatoia non valida: {key}',
+        'notify.hotkey_conflict': '{key} è già usata da un\'altra app — potrebbe non funzionare',
+        'notify.hotkey_failed': 'Impossibile assegnare {key}',
+        'menu.cleanup': 'Elimina vecchi screenshot',
+        'menu.cleanup_never': 'Mai',
+        'menu.cleanup_days': 'Più vecchi di {days} giorni',
+        'notify.cleanup_on': 'Pulizia: più vecchi di {days} giorni (eliminati ora: {count})',
+        'notify.cleanup_off': 'Pulizia: disattivata',
     },
     'es': {
         'lang.name': 'Español',
@@ -298,10 +393,6 @@ I18N = {
         'dialog.prefix_prompt': "Prefijo del nombre (vacío = usar predeterminado '{default}'):",
         'default.filename_base': 'Captura',
         'menu.title': 'Asistente de capturas',
-        'menu.hotkey_dialog': 'Ctrl+Alt+S — guardar con diálogo',
-        'menu.hotkey_quick': 'Ctrl+Alt+Shift+S — guardado rápido en Pictures\\Screenshots',
-        'menu.hotkey_area': 'Ctrl+Alt+A — capturar área de pantalla',
-        'menu.hotkey_ocr': 'Ctrl+Alt+D — OCR (texto de la imagen del portapapeles)',
         'menu.prefix_none': 'Prefijo del nombre: (ninguno)',
         'menu.prefix': 'Prefijo del nombre: {value}',
         'menu.autoresize': 'Reducir imágenes grandes (>{px}px)',
@@ -311,6 +402,22 @@ I18N = {
         'menu.open_log': 'Abrir registro de errores',
         'menu.language': 'Idioma',
         'menu.exit': 'Salir',
+        'menu.hotkeys': 'Atajos de teclado',
+        'action.dialog': 'Guardar con diálogo',
+        'action.quick': 'Guardado rápido',
+        'action.area': 'Capturar área',
+        'action.ocr': 'OCR',
+        'dialog.hotkey_title': 'Cambiar atajo',
+        'dialog.hotkey_prompt': 'Atajo para «{action}».\nPor ejemplo: ctrl+alt+a',
+        'notify.hotkey_set': 'Atajo: {key}',
+        'notify.hotkey_invalid': 'Atajo no válido: {key}',
+        'notify.hotkey_conflict': '{key} ya lo usa otra aplicación — puede que no funcione',
+        'notify.hotkey_failed': 'No se pudo asignar {key}',
+        'menu.cleanup': 'Eliminar capturas antiguas',
+        'menu.cleanup_never': 'Nunca',
+        'menu.cleanup_days': 'Más de {days} días',
+        'notify.cleanup_on': 'Limpieza: más de {days} días (eliminadas ahora: {count})',
+        'notify.cleanup_off': 'Limpieza: desactivada',
     },
     'fr': {
         'lang.name': 'Français',
@@ -336,10 +443,6 @@ I18N = {
         'dialog.prefix_prompt': "Préfixe du nom de fichier (vide = utiliser '{default}' par défaut) :",
         'default.filename_base': 'Capture',
         'menu.title': 'Assistant de capture',
-        'menu.hotkey_dialog': 'Ctrl+Alt+S — enregistrer via la boîte de dialogue',
-        'menu.hotkey_quick': 'Ctrl+Alt+Shift+S — enregistrement rapide dans Pictures\\Screenshots',
-        'menu.hotkey_area': "Ctrl+Alt+A — capturer une zone de l'écran",
-        'menu.hotkey_ocr': "Ctrl+Alt+D — OCR (texte de l'image du presse-papiers)",
         'menu.prefix_none': 'Préfixe du nom : (aucun)',
         'menu.prefix': 'Préfixe du nom : {value}',
         'menu.autoresize': 'Réduire les grandes images (>{px}px)',
@@ -349,6 +452,22 @@ I18N = {
         'menu.open_log': 'Ouvrir le journal des erreurs',
         'menu.language': 'Langue',
         'menu.exit': 'Quitter',
+        'menu.hotkeys': 'Raccourcis clavier',
+        'action.dialog': 'Enregistrer via la boîte de dialogue',
+        'action.quick': 'Enregistrement rapide',
+        'action.area': 'Capturer une zone',
+        'action.ocr': 'OCR',
+        'dialog.hotkey_title': 'Modifier le raccourci',
+        'dialog.hotkey_prompt': 'Raccourci pour « {action} ».\nPar exemple : ctrl+alt+a',
+        'notify.hotkey_set': 'Raccourci : {key}',
+        'notify.hotkey_invalid': 'Raccourci invalide : {key}',
+        'notify.hotkey_conflict': '{key} est déjà utilisé par une autre application — il risque de ne pas fonctionner',
+        'notify.hotkey_failed': 'Impossible d\'attribuer {key}',
+        'menu.cleanup': 'Supprimer les anciennes captures',
+        'menu.cleanup_never': 'Jamais',
+        'menu.cleanup_days': 'Plus de {days} jours',
+        'notify.cleanup_on': 'Nettoyage : plus de {days} jours (supprimées : {count})',
+        'notify.cleanup_off': 'Nettoyage : désactivé',
     },
     'pt': {
         'lang.name': 'Português',
@@ -374,10 +493,6 @@ I18N = {
         'dialog.prefix_prompt': "Prefixo do nome (vazio = usar padrão '{default}'):",
         'default.filename_base': 'Captura',
         'menu.title': 'Assistente de capturas',
-        'menu.hotkey_dialog': 'Ctrl+Alt+S — salvar via caixa de diálogo',
-        'menu.hotkey_quick': 'Ctrl+Alt+Shift+S — salvar rápido em Pictures\\Screenshots',
-        'menu.hotkey_area': 'Ctrl+Alt+A — capturar área da tela',
-        'menu.hotkey_ocr': 'Ctrl+Alt+D — OCR (texto da imagem na área de transferência)',
         'menu.prefix_none': 'Prefixo do nome: (nenhum)',
         'menu.prefix': 'Prefixo do nome: {value}',
         'menu.autoresize': 'Redimensionar imagens grandes (>{px}px)',
@@ -387,6 +502,22 @@ I18N = {
         'menu.open_log': 'Abrir registro de erros',
         'menu.language': 'Idioma',
         'menu.exit': 'Sair',
+        'menu.hotkeys': 'Atalhos de teclado',
+        'action.dialog': 'Salvar via caixa de diálogo',
+        'action.quick': 'Salvamento rápido',
+        'action.area': 'Capturar área',
+        'action.ocr': 'OCR',
+        'dialog.hotkey_title': 'Alterar atalho',
+        'dialog.hotkey_prompt': 'Atalho para "{action}".\nPor exemplo: ctrl+alt+a',
+        'notify.hotkey_set': 'Atalho: {key}',
+        'notify.hotkey_invalid': 'Atalho inválido: {key}',
+        'notify.hotkey_conflict': '{key} já está em uso por outro aplicativo — pode não funcionar',
+        'notify.hotkey_failed': 'Não foi possível atribuir {key}',
+        'menu.cleanup': 'Excluir capturas antigas',
+        'menu.cleanup_never': 'Nunca',
+        'menu.cleanup_days': 'Mais de {days} dias',
+        'notify.cleanup_on': 'Limpeza: mais de {days} dias (excluídas agora: {count})',
+        'notify.cleanup_off': 'Limpeza: desativada',
     },
     'ko': {
         'lang.name': '한국어',
@@ -412,10 +543,6 @@ I18N = {
         'dialog.prefix_prompt': "파일 이름 접두사 (비움 = 기본값 '{default}' 사용):",
         'default.filename_base': '스크린샷',
         'menu.title': '스크린샷 도우미',
-        'menu.hotkey_dialog': 'Ctrl+Alt+S — 대화 상자로 저장',
-        'menu.hotkey_quick': 'Ctrl+Alt+Shift+S — Pictures\\Screenshots에 빠른 저장',
-        'menu.hotkey_area': 'Ctrl+Alt+A — 화면 영역 캡처',
-        'menu.hotkey_ocr': 'Ctrl+Alt+D — OCR (클립보드 이미지에서 텍스트)',
         'menu.prefix_none': '파일 이름 접두사: (없음)',
         'menu.prefix': '파일 이름 접두사: {value}',
         'menu.autoresize': '큰 이미지 자동 축소 (>{px}px)',
@@ -425,6 +552,22 @@ I18N = {
         'menu.open_log': '오류 로그 열기',
         'menu.language': '언어',
         'menu.exit': '종료',
+        'menu.hotkeys': '단축키',
+        'action.dialog': '대화 상자로 저장',
+        'action.quick': '빠른 저장',
+        'action.area': '영역 캡처',
+        'action.ocr': 'OCR',
+        'dialog.hotkey_title': '단축키 변경',
+        'dialog.hotkey_prompt': '"{action}"의 단축키.\n예: ctrl+alt+a',
+        'notify.hotkey_set': '단축키: {key}',
+        'notify.hotkey_invalid': '올바른 단축키가 아닙니다: {key}',
+        'notify.hotkey_conflict': '{key} 은(는) 다른 앱이 사용 중입니다 — 작동하지 않을 수 있습니다',
+        'notify.hotkey_failed': '{key} 을(를) 지정할 수 없습니다',
+        'menu.cleanup': '오래된 스크린샷 삭제',
+        'menu.cleanup_never': '삭제 안 함',
+        'menu.cleanup_days': '{days}일 이전',
+        'notify.cleanup_on': '정리: {days}일 이전 (지금 삭제: {count}개)',
+        'notify.cleanup_off': '정리: 꺼짐',
     },
 }
 
@@ -488,6 +631,79 @@ def _default_extension() -> str:
 
 
 # ============================================================
+# Горячие клавиши: хранение, отображение, проверка занятости
+# ============================================================
+def get_hotkey(action: str) -> str:
+    stored = (get_config("hotkeys", {}) or {}).get(action)
+    if isinstance(stored, str) and stored.strip():
+        return stored.strip().lower()
+    return HOTKEY_DEFAULTS[action]
+
+
+def set_hotkey(action: str, combo: str) -> None:
+    hotkeys = dict(get_config("hotkeys", {}) or {})
+    hotkeys[action] = combo
+    set_config("hotkeys", hotkeys)
+
+
+def _pretty_hotkey(combo: str) -> str:
+    return '+'.join(part.strip().title() for part in combo.split('+'))
+
+
+_MOD_FLAGS = {'alt': 0x0001, 'ctrl': 0x0002, 'control': 0x0002,
+              'shift': 0x0004, 'win': 0x0008, 'windows': 0x0008}
+
+
+def _combo_to_win_hotkey(combo: str):
+    """'ctrl+alt+a' -> (модификаторы, virtual key) в терминах RegisterHotKey."""
+    mods, vk = 0, None
+    for part in combo.lower().split('+'):
+        part = part.strip()
+        if part in _MOD_FLAGS:
+            mods |= _MOD_FLAGS[part]
+        elif len(part) == 1:
+            char = part.upper()
+            if 'A' <= char <= 'Z' or '0' <= char <= '9':
+                # У латиницы и цифр virtual key совпадает с ASCII и не зависит
+                # от раскладки. Через VkKeyScanW они бы отваливались, когда
+                # активна русская раскладка: латинской «a» в ней просто нет.
+                vk = ord(char)
+            else:
+                # c_wchar обязателен: без него ctypes передаёт указатель на
+                # строку, а VkKeyScanW ждёт сам символ.
+                scan = ctypes.windll.user32.VkKeyScanW(ctypes.c_wchar(part))
+                if scan == -1:
+                    return None
+                vk = scan & 0xFF
+        elif part.startswith('f') and part[1:].isdigit():
+            vk = 0x70 + int(part[1:]) - 1  # F1..F24
+        else:
+            return None  # экзотическая клавиша — проверить не сможем
+    if vk is None or not mods:
+        return None
+    return mods, vk
+
+
+def is_hotkey_taken(combo: str) -> bool:
+    """True, если комбинацию уже держит другое приложение.
+
+    Видны только те, кто регистрируется штатным RegisterHotKey — а это
+    большинство программ. Утилиты на low-level хуке (как эта) так не
+    определяются: они перехватывают клавиши раньше и молча.
+    """
+    parsed = _combo_to_win_hotkey(combo)
+    if not parsed:
+        return False
+    mods, vk = parsed
+    user32 = ctypes.windll.user32
+    hotkey_id = 0xB00B
+    if user32.RegisterHotKey(None, hotkey_id, mods, vk):
+        user32.UnregisterHotKey(None, hotkey_id)
+        return False
+    return True
+
+
+# ============================================================
 # Локализация
 # ============================================================
 def get_language() -> str:
@@ -516,13 +732,36 @@ def t(key: str, **kwargs) -> str:
 # ============================================================
 # Утилиты
 # ============================================================
-def log_error(msg: str) -> None:
+def _write_log(level: str, msg: str) -> None:
     try:
         os.makedirs(APP_DATA_DIR, exist_ok=True)
+        try:
+            if os.path.getsize(LOG_FILE) > LOG_MAX_BYTES:
+                os.replace(LOG_FILE, LOG_FILE + ".1")
+        except OSError:
+            pass  # файла ещё нет либо он занят — не повод терять запись
         with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{level}] {msg}\n")
     except Exception:
         pass
+
+
+def log_error(msg: str) -> None:
+    _write_log("ERROR", msg)
+
+
+def log_info(msg: str) -> None:
+    _write_log("INFO", msg)
+
+
+def log_debug(msg: str) -> None:
+    """Подробности вроде сырых результатов OCR — только когда их включили.
+
+    Иначе каждый Ctrl+Alt+D писал в error.log две строки распознанного текста,
+    и «лог ошибок» превращался в историю буфера обмена.
+    """
+    if get_config("debug_log", False):
+        _write_log("DEBUG", msg)
 
 
 def notify(message: str) -> None:
@@ -771,7 +1010,32 @@ def _capture_screen_area_bbox():
     hole = canvas.create_rectangle(0, 0, 0, 0, fill=MAGIC, outline='', width=0)
     sel_rect = canvas.create_rectangle(0, 0, 0, 0, outline='red', width=2)
 
+    # Подпись с размером выделения. Рисуется по затемнённому фону (не по «дырке»),
+    # иначе попала бы в кадр — поэтому держим её снаружи рамки.
+    size_bg = canvas.create_rectangle(0, 0, 0, 0, fill='#1a1a1a', outline='', state='hidden')
+    size_text = canvas.create_text(0, 0, text='', anchor='nw', fill='white',
+                                   font=('Segoe UI', 11, 'bold'), state='hidden')
+
     state = {'start': None, 'bbox': None, 'after_id': None, 'last': None}
+
+    def _place_size_label(cx1, cy1, cx2, cy2):
+        width, height = int(cx2 - cx1), int(cy2 - cy1)
+        if width <= 0 or height <= 0:
+            canvas.itemconfig(size_text, state='hidden')
+            canvas.itemconfig(size_bg, state='hidden')
+            return
+        # Под рамкой, а если там край экрана — над ней
+        label_y = cy2 + 8 if cy2 + 34 < virtual_h else max(0, cy1 - 28)
+        label_x = min(cx1 + 2, max(0, virtual_w - 96))
+        canvas.coords(size_text, label_x, label_y)
+        canvas.itemconfig(size_text, text=f"{width} × {height}", state='normal')
+        bounds = canvas.bbox(size_text)
+        if bounds:
+            canvas.coords(size_bg, bounds[0] - 6, bounds[1] - 4,
+                          bounds[2] + 6, bounds[3] + 4)
+            canvas.itemconfig(size_bg, state='normal')
+        canvas.tag_raise(size_bg)
+        canvas.tag_raise(size_text)
 
     def set_selection(cx1, cy1, cx2, cy2):
         cx1, cx2 = sorted((cx1, cx2))
@@ -782,6 +1046,7 @@ def _capture_screen_area_bbox():
         cy2 = max(0, min(virtual_h, cy2))
         canvas.coords(hole, cx1, cy1, cx2, cy2)
         canvas.coords(sel_rect, cx1, cy1, cx2, cy2)
+        _place_size_label(cx1, cy1, cx2, cy2)
 
     def _apply_pending():
         state['after_id'] = None
@@ -887,8 +1152,84 @@ def save_screenshot_area() -> None:
 # ============================================================
 # OCR через Windows.Media.Ocr (без интернета)
 # ============================================================
-def _has_cyrillic(s: str) -> bool:
-    return any('Ѐ' <= c <= 'ӿ' for c in s)
+# Диапазоны письменностей: по ним отличаем осмысленный результат от того,
+# что чужой движок вычитал «на свой лад» (`nepe3anyu.1e1-l` вместо «перезапустил»).
+_SCRIPT_RANGES = {
+    'cyrillic': ((0x0400, 0x04FF),),
+    'latin': ((0x0041, 0x005A), (0x0061, 0x007A), (0x00C0, 0x024F)),
+    'cjk': ((0x3400, 0x4DBF), (0x4E00, 0x9FFF)),
+    'kana': ((0x3040, 0x30FF),),
+    'hangul': ((0x1100, 0x11FF), (0xAC00, 0xD7AF)),
+}
+
+# Какую письменность ждём от движка конкретного языка
+_LANG_SCRIPTS = {
+    'ru': ('cyrillic',), 'uk': ('cyrillic',), 'be': ('cyrillic',),
+    'bg': ('cyrillic',), 'sr': ('cyrillic',), 'mk': ('cyrillic',),
+    'zh': ('cjk',), 'ja': ('kana', 'cjk'), 'ko': ('hangul',),
+}
+_DEFAULT_SCRIPTS = ('latin',)
+
+
+def _scripts_of_lang(tag: str) -> tuple:
+    return _LANG_SCRIPTS.get((tag or '').split('-')[0].lower(), _DEFAULT_SCRIPTS)
+
+
+def _in_scripts(ch: str, scripts: tuple) -> bool:
+    code = ord(ch)
+    for name in scripts:
+        for low, high in _SCRIPT_RANGES[name]:
+            if low <= code <= high:
+                return True
+    return False
+
+
+def _score_ocr_text(text: str, scripts: tuple) -> int:
+    """Насколько текст похож на осмысленный для этой письменности.
+
+    Одного подсчёта «своих» букв мало: кириллица и латиница похожи начертанием,
+    поэтому английский движок читает «Перезапусти сервер» как «nepeaanycTL4
+    cepBep» — формально это тоже латинские слова. Отличает их рваность:
+    цифры вместо букв и заглавные посреди слова. За них и штрафуем.
+    """
+    score = 0
+    for chunk in text.split():
+        letters = sum(1 for c in chunk if _in_scripts(c, scripts))
+        if letters < 2 or letters < len(chunk) * 0.6:
+            continue
+        word_score = letters
+        if any(c.isdigit() for c in chunk):
+            word_score -= 3
+        word_score -= sum(1 for c in chunk[1:] if c.isupper()) * 2
+        score += max(0, word_score)
+    return score
+
+
+def _ocr_languages() -> list:
+    """Какими движками пробовать: язык интерфейса, затем английский, затем
+    остальные установленные в системе."""
+    override = get_config("ocr_languages", None)
+    try:
+        # ВНИМАНИЕ: не переписывать на `for lang in languages` — итератор этой
+        # WinRT-коллекции роняет процесс с access violation (проверено на
+        # winsdk 1.0.0b10 / Python 3.13, воспроизводится стабильно). Access
+        # violation не перехватывается try/except, приложение умирает молча.
+        # Обращение по индексу работает надёжно.
+        languages = OcrEngine.available_recognizer_languages
+        available = [languages[i].language_tag for i in range(len(languages))]
+    except Exception as e:
+        log_error(f"ocr languages: {e}")
+        available = list(OCR_LANGUAGES)
+
+    if isinstance(override, list) and override:
+        ordered = [tag for tag in override if tag in available] or available
+    else:
+        ui = get_language().lower()
+        ordered = [tag for tag in available if tag.lower().split('-')[0] == ui]
+        ordered += [tag for tag in available
+                    if tag.lower().startswith('en') and tag not in ordered]
+        ordered += [tag for tag in available if tag not in ordered]
+    return ordered[:MAX_OCR_ENGINES]
 
 
 def _upscale_for_ocr(image: Image.Image, target_min_side: int = 1500) -> Image.Image:
@@ -918,8 +1259,8 @@ async def _ocr_pil_image_async(pil_image: Image.Image) -> str:
     decoder = await BitmapDecoder.create_async(stream)
     bitmap = await decoder.get_software_bitmap_async()
 
-    results: dict = {}
-    for tag in OCR_LANGUAGES:
+    results = []
+    for tag in _ocr_languages():
         try:
             lang = Language(tag)
             if not OcrEngine.is_language_supported(lang):
@@ -929,24 +1270,22 @@ async def _ocr_pil_image_async(pil_image: Image.Image) -> str:
                 continue
             result = await engine.recognize_async(bitmap)
             text = (result.text or "").strip()
-            results[tag] = text
+            if not text:
+                continue
+            score = _score_ocr_text(text, _scripts_of_lang(tag))
+            results.append((score, text))
             preview = text[:80].replace('\n', ' ')
-            log_error(f"ocr[{tag}] len={len(text)} | {preview}")
+            log_debug(f"ocr[{tag}] score={score} len={len(text)} | {preview}")
         except Exception as e:
             log_error(f"ocr engine {tag}: {e}")
 
-    ru = results.get('ru-RU', '')
-    en = results.get('en-US', '')
-
-    # Если в русском результате есть кириллица — он точно подходит лучше:
-    # английский движок попытается прочесть русский текст латиницей и выдаст мусор.
-    if _has_cyrillic(ru):
-        return ru
-    # Иначе берём английский (для чисто латинских текстов он точнее).
-    if en:
-        return en
-    # Фоллбэк — что есть.
-    return ru
+    if not results:
+        return ""
+    # Побеждает движок, чей результат больше похож на текст его языка.
+    # Сортировка стабильна, поэтому при равном счёте выигрывает тот, кто шёл
+    # раньше в _ocr_languages() — то есть язык интерфейса.
+    results.sort(key=lambda item: item[0], reverse=True)
+    return results[0][1]
 
 
 def ocr_pil_image(pil_image: Image.Image) -> str:
@@ -1008,6 +1347,102 @@ def show_prefix_dialog() -> None:
 
 
 # ============================================================
+# Диалог смены горячей клавиши
+# ============================================================
+def show_hotkey_dialog(action: str) -> None:
+    if action not in HOTKEY_DEFAULTS:
+        return
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes('-topmost', True)
+    try:
+        new_value = simpledialog.askstring(
+            t('dialog.hotkey_title'),
+            t('dialog.hotkey_prompt', action=t('action.' + action)),
+            initialvalue=get_hotkey(action),
+            parent=root,
+        )
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+    if new_value is None:
+        return  # «Отмена»
+
+    combo = new_value.strip().lower()
+    if not combo:
+        return
+
+    try:
+        keyboard.parse_hotkey(combo)
+    except Exception:
+        notify(t('notify.hotkey_invalid', key=new_value.strip()))
+        return
+
+    # Занятую комбинацию всё равно ставим: low-level хук перехватит клавиши
+    # раньше владельца — но предупредить стоит, поведение будет неочевидным.
+    if combo != get_hotkey(action) and is_hotkey_taken(combo):
+        notify(t('notify.hotkey_conflict', key=_pretty_hotkey(combo)))
+
+    set_hotkey(action, combo)
+    register_hotkeys()
+    notify(t('notify.hotkey_set', key=_pretty_hotkey(combo)))
+    if icon_ref is not None:
+        try:
+            icon_ref.update_menu()
+        except Exception:
+            pass
+
+
+# ============================================================
+# Автоудаление старых снимков
+# ============================================================
+def cleanup_old_screenshots() -> int:
+    """Удаляет снимки старше настроенного срока. Возвращает число удалённых."""
+    days = get_config("cleanup_days", 0)
+    if not isinstance(days, int) or days <= 0:
+        return 0
+
+    cutoff = time.time() - days * 86400
+    removed = 0
+    try:
+        for name in os.listdir(DEFAULT_SCREENSHOTS_DIR):
+            # Чужие файлы в папке (в т.ч. снимки самой Windows) не трогаем —
+            # только то, что назвала эта программа.
+            if not SCREENSHOT_NAME_RE.match(name):
+                continue
+            path = os.path.join(DEFAULT_SCREENSHOTS_DIR, name)
+            try:
+                if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    removed += 1
+            except OSError as e:
+                log_error(f"cleanup {name}: {e}")
+    except FileNotFoundError:
+        return 0
+    except Exception as e:
+        log_error(f"cleanup: {e}")
+        return 0
+
+    if removed:
+        log_info(f"cleanup: удалено {removed} файлов старше {days} дн.")
+    return removed
+
+
+def cleanup_loop() -> None:
+    delay = 60  # первый прогон — через минуту после старта, не в момент запуска
+    while not stop_event.wait(delay):
+        delay = CLEANUP_INTERVAL
+        try:
+            cleanup_old_screenshots()
+        except Exception as e:
+            log_error(f"cleanup_loop: {e}")
+
+
+# ============================================================
 # Worker и горячие клавиши
 # ============================================================
 def on_hotkey_dialog():
@@ -1026,6 +1461,29 @@ def on_hotkey_ocr():
     action_queue.put('ocr')
 
 
+_HOTKEY_CALLBACKS = {
+    'dialog': on_hotkey_dialog,
+    'quick': on_hotkey_quick,
+    'area': on_hotkey_area,
+    'ocr': on_hotkey_ocr,
+}
+
+
+def register_hotkeys() -> None:
+    """Перевешивает все хоткеи по текущим настройкам."""
+    try:
+        keyboard.remove_all_hotkeys()
+    except Exception:
+        pass
+    for action, callback in _HOTKEY_CALLBACKS.items():
+        combo = get_hotkey(action)
+        try:
+            keyboard.add_hotkey(combo, callback)
+        except Exception as e:
+            log_error(f"add_hotkey {action}={combo}: {e}")
+            notify(t('notify.hotkey_failed', key=_pretty_hotkey(combo)))
+
+
 def worker_loop():
     while not stop_event.is_set():
         try:
@@ -1042,6 +1500,67 @@ def worker_loop():
             ocr_from_clipboard()
         elif action == 'set_prefix':
             show_prefix_dialog()
+        elif action.startswith('set_hotkey:'):
+            show_hotkey_dialog(action.split(':', 1)[1])
+
+
+# ============================================================
+# Watchdog состояния клавиатуры
+# ============================================================
+# keyboard ищет хоткей по ТОЧНОМУ набору зажатых клавиш:
+#   hotkey = tuple(sorted(_pressed_events)); self.nonblocking_hotkeys[hotkey]
+# Набор ведётся только по событиям low-level хука. Если KEY_UP до хука не дошёл
+# (клавишу отпустили, когда фокус был в окне админ-процесса, на UAC-промпте,
+# экране блокировки или в полноэкранной игре), клавиша остаётся в наборе
+# навсегда — и ВСЕ хоткеи молча перестают срабатывать до перезапуска процесса.
+# Раз в WATCHDOG_INTERVAL сверяем набор с физическим состоянием клавиш
+# и выкидываем фантомы.
+WATCHDOG_INTERVAL = 2.0
+MAPVK_VSC_TO_VK_EX = 3
+VK_SHIFT, VK_CONTROL, VK_MENU = 0x10, 0x11, 0x12
+_SIDED_VK = {0xA0: VK_SHIFT, 0xA1: VK_SHIFT,      # left/right shift
+             0xA2: VK_CONTROL, 0xA3: VK_CONTROL,  # left/right ctrl
+             0xA4: VK_MENU, 0xA5: VK_MENU}        # left/right alt
+
+
+def _is_physically_pressed(scan_code: int) -> bool:
+    """True, если клавиша реально удерживается прямо сейчас."""
+    user32 = ctypes.windll.user32
+    # keyboard хранит scan_code как `scan_code or -vk` — отрицательное значение
+    # означает, что скан-кода не было и это сразу virtual key.
+    vk = -scan_code if scan_code < 0 else user32.MapVirtualKeyW(scan_code, MAPVK_VSC_TO_VK_EX)
+    if not vk:
+        return True  # не смогли определить — не трогаем, чтобы не снять живую
+    if user32.GetAsyncKeyState(vk) & 0x8000:
+        return True
+    # Скан-код не различает левый и правый модификатор, поэтому проверяем ещё и
+    # обобщённый VK — иначе снимем реально зажатый правый Ctrl/Alt/Shift.
+    generic = _SIDED_VK.get(vk)
+    return bool(generic and (user32.GetAsyncKeyState(generic) & 0x8000))
+
+
+def keyboard_watchdog_loop() -> None:
+    while not stop_event.wait(WATCHDOG_INTERVAL):
+        try:
+            with keyboard._pressed_events_lock:
+                stuck = [sc for sc in list(keyboard._pressed_events)
+                         if not _is_physically_pressed(sc)]
+                for sc in stuck:
+                    keyboard._pressed_events.pop(sc, None)
+                    keyboard._logically_pressed_keys.pop(sc, None)
+                    keyboard._listener.active_modifiers.discard(sc)
+            if stuck:
+                log_error(f"watchdog: сняты залипшие клавиши {stuck}")
+
+            # Флаги AltGr в _winkeyboard живут отдельно от набора нажатых клавиш
+            # и тоже залипают: ignore_next_right_alt съедает следующий правый Alt.
+            if not (ctypes.windll.user32.GetAsyncKeyState(VK_MENU) & 0x8000):
+                _winkeyboard.altgr_is_pressed = False
+                _winkeyboard.ignore_next_right_alt = False
+            if not (ctypes.windll.user32.GetAsyncKeyState(VK_SHIFT) & 0x8000):
+                _winkeyboard.shift_is_pressed = False
+        except Exception as e:
+            log_error(f"watchdog: {e}")
 
 
 # ============================================================
@@ -1190,6 +1709,49 @@ def menu_exit(icon, item):
         pass
 
 
+def _make_hotkey_setter(action: str):
+    def setter(icon, item):
+        action_queue.put(f'set_hotkey:{action}')
+    return setter
+
+
+def _build_hotkeys_menu() -> pystray.Menu:
+    return pystray.Menu(*[
+        pystray.MenuItem(
+            (lambda a: lambda item: f"{t('action.' + a)}: {_pretty_hotkey(get_hotkey(a))}")(action),
+            _make_hotkey_setter(action),
+        )
+        for action in ('dialog', 'quick', 'area', 'ocr')
+    ])
+
+
+def _make_cleanup_setter(days: int):
+    def setter(icon, item):
+        set_config("cleanup_days", days)
+        try:
+            icon.update_menu()
+        except Exception:
+            pass
+        if days:
+            notify(t('notify.cleanup_on', days=days, count=cleanup_old_screenshots()))
+        else:
+            notify(t('notify.cleanup_off'))
+    return setter
+
+
+def _build_cleanup_menu() -> pystray.Menu:
+    return pystray.Menu(*[
+        pystray.MenuItem(
+            (lambda d: lambda item: t('menu.cleanup_never') if d == 0
+             else t('menu.cleanup_days', days=d))(days),
+            _make_cleanup_setter(days),
+            radio=True,
+            checked=(lambda d: lambda item: get_config("cleanup_days", 0) == d)(days),
+        )
+        for days in CLEANUP_CHOICES
+    ])
+
+
 def _build_language_menu() -> pystray.Menu:
     items = []
     for code, table in I18N.items():
@@ -1207,13 +1769,11 @@ def build_menu():
     return pystray.Menu(
         pystray.MenuItem(lambda item: t('menu.title'), None, enabled=False),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem(lambda item: t('menu.hotkey_dialog'), None, enabled=False),
-        pystray.MenuItem(lambda item: t('menu.hotkey_quick'), None, enabled=False),
-        pystray.MenuItem(lambda item: t('menu.hotkey_area'), None, enabled=False),
-        pystray.MenuItem(lambda item: t('menu.hotkey_ocr'), None, enabled=False),
+        pystray.MenuItem(lambda item: t('menu.hotkeys'), _build_hotkeys_menu()),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(_prefix_menu_text, menu_set_prefix),
         pystray.MenuItem(lambda item: t('menu.format'), _build_format_menu()),
+        pystray.MenuItem(lambda item: t('menu.cleanup'), _build_cleanup_menu()),
         pystray.MenuItem(
             lambda item: t('menu.autoresize', px=MAX_DIMENSION),
             menu_toggle_resize,
@@ -1264,13 +1824,13 @@ def main() -> None:
     except Exception as e:
         log_error(f"main mkdir: {e}")
 
-    keyboard.add_hotkey(HOTKEY_DIALOG, on_hotkey_dialog)
-    keyboard.add_hotkey(HOTKEY_QUICK, on_hotkey_quick)
-    keyboard.add_hotkey(HOTKEY_AREA, on_hotkey_area)
-    keyboard.add_hotkey(HOTKEY_OCR, on_hotkey_ocr)
+    register_hotkeys()
 
     worker_thread = threading.Thread(target=worker_loop, daemon=True)
     worker_thread.start()
+
+    threading.Thread(target=keyboard_watchdog_loop, daemon=True).start()
+    threading.Thread(target=cleanup_loop, daemon=True).start()
 
     icon_ref = pystray.Icon(
         "screenshot_to_terminal",
