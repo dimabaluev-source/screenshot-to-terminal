@@ -9,6 +9,7 @@ import asyncio
 import threading
 import ctypes
 import winreg
+import subprocess
 import keyboard
 from keyboard import _winkeyboard
 import pystray
@@ -66,6 +67,22 @@ SCREENSHOT_NAME_RE = re.compile(
 MUTEX_NAME = "ScreenshotToTerminal_SingleInstance_Mutex"
 APP_TITLE = "Screenshot to Terminal"
 
+# Перезапуск: старая копия поднимает новую с этим флагом, новая ждёт, пока
+# освободится мьютекс, вместо того чтобы решить «уже запущен» и выйти.
+RESTART_FLAG = "--restarted"
+RESTART_WAIT = 10.0
+
+# Самопроверка. Бывает, что процесс жив, хук на месте, а горячие клавиши молча
+# перестают срабатывать — лечится только перезапуском (разбор 04.08.2026:
+# события доходят до очереди keyboard, но обработчик хоткея не вызывается).
+# Поэтому раз в минуту шлём себе безобидную клавишу и проверяем, что она прошла
+# весь путь до обработчика. Не прошла дважды подряд — перезапускаемся.
+HEARTBEAT_INTERVAL = 60.0
+HEARTBEAT_TIMEOUT = 1.5
+HEARTBEAT_FAILS_BEFORE_RESTART = 2
+HEARTBEAT_VK = 0xFC             # VK_NONAME: ни одно приложение на неё не реагирует
+HEARTBEAT_SCAN = -HEARTBEAT_VK  # keyboard хранит клавишу без скан-кода как -vk
+
 DEFAULT_LANGUAGE = 'en'
 
 I18N = {
@@ -101,6 +118,8 @@ I18N = {
         'menu.open_folder': 'Open screenshots folder',
         'menu.open_log': 'Open error log',
         'menu.language': 'Language',
+        'menu.restart': 'Restart',
+        'notify.restart_failed': 'Could not restart',
         'menu.exit': 'Exit',
         'menu.hotkeys': 'Hotkeys',
         'action.dialog': 'Save via dialog',
@@ -151,6 +170,8 @@ I18N = {
         'menu.open_folder': 'Открыть папку скриншотов',
         'menu.open_log': 'Открыть лог ошибок',
         'menu.language': 'Язык',
+        'menu.restart': 'Перезапустить',
+        'notify.restart_failed': 'Не удалось перезапустить',
         'menu.exit': 'Выход',
         'menu.hotkeys': 'Горячие клавиши',
         'action.dialog': 'Сохранить через диалог',
@@ -201,6 +222,8 @@ I18N = {
         'menu.open_folder': '打开截图文件夹',
         'menu.open_log': '打开错误日志',
         'menu.language': '语言',
+        'menu.restart': '重启',
+        'notify.restart_failed': '无法重启',
         'menu.exit': '退出',
         'menu.hotkeys': '快捷键',
         'action.dialog': '通过对话框保存',
@@ -251,6 +274,8 @@ I18N = {
         'menu.open_folder': 'スクリーンショットフォルダを開く',
         'menu.open_log': 'エラーログを開く',
         'menu.language': '言語',
+        'menu.restart': '再起動',
+        'notify.restart_failed': '再起動できませんでした',
         'menu.exit': '終了',
         'menu.hotkeys': 'ショートカットキー',
         'action.dialog': 'ダイアログで保存',
@@ -301,6 +326,8 @@ I18N = {
         'menu.open_folder': 'Screenshot-Ordner öffnen',
         'menu.open_log': 'Fehlerprotokoll öffnen',
         'menu.language': 'Sprache',
+        'menu.restart': 'Neu starten',
+        'notify.restart_failed': 'Neustart fehlgeschlagen',
         'menu.exit': 'Beenden',
         'menu.hotkeys': 'Tastenkürzel',
         'action.dialog': 'Über Dialog speichern',
@@ -351,6 +378,8 @@ I18N = {
         'menu.open_folder': 'Apri cartella screenshot',
         'menu.open_log': 'Apri registro errori',
         'menu.language': 'Lingua',
+        'menu.restart': 'Riavvia',
+        'notify.restart_failed': 'Impossibile riavviare',
         'menu.exit': 'Esci',
         'menu.hotkeys': 'Scorciatoie',
         'action.dialog': 'Salva tramite finestra',
@@ -401,6 +430,8 @@ I18N = {
         'menu.open_folder': 'Abrir carpeta de capturas',
         'menu.open_log': 'Abrir registro de errores',
         'menu.language': 'Idioma',
+        'menu.restart': 'Reiniciar',
+        'notify.restart_failed': 'No se pudo reiniciar',
         'menu.exit': 'Salir',
         'menu.hotkeys': 'Atajos de teclado',
         'action.dialog': 'Guardar con diálogo',
@@ -451,6 +482,8 @@ I18N = {
         'menu.open_folder': 'Ouvrir le dossier des captures',
         'menu.open_log': 'Ouvrir le journal des erreurs',
         'menu.language': 'Langue',
+        'menu.restart': 'Redémarrer',
+        'notify.restart_failed': 'Échec du redémarrage',
         'menu.exit': 'Quitter',
         'menu.hotkeys': 'Raccourcis clavier',
         'action.dialog': 'Enregistrer via la boîte de dialogue',
@@ -501,6 +534,8 @@ I18N = {
         'menu.open_folder': 'Abrir pasta de capturas',
         'menu.open_log': 'Abrir registro de erros',
         'menu.language': 'Idioma',
+        'menu.restart': 'Reiniciar',
+        'notify.restart_failed': 'Não foi possível reiniciar',
         'menu.exit': 'Sair',
         'menu.hotkeys': 'Atalhos de teclado',
         'action.dialog': 'Salvar via caixa de diálogo',
@@ -551,6 +586,8 @@ I18N = {
         'menu.open_folder': '스크린샷 폴더 열기',
         'menu.open_log': '오류 로그 열기',
         'menu.language': '언어',
+        'menu.restart': '다시 시작',
+        'notify.restart_failed': '다시 시작할 수 없습니다',
         'menu.exit': '종료',
         'menu.hotkeys': '단축키',
         'action.dialog': '대화 상자로 저장',
@@ -586,6 +623,7 @@ action_queue: "queue.Queue[str]" = queue.Queue()
 icon_ref = None
 _mutex_handle = None
 _config_cache = None
+_heartbeat_seen = threading.Event()
 
 
 # ============================================================
@@ -1483,6 +1521,13 @@ def register_hotkeys() -> None:
             log_error(f"add_hotkey {action}={combo}: {e}")
             notify(t('notify.hotkey_failed', key=_pretty_hotkey(combo)))
 
+    # Служебный хоткей самопроверки — регистрируется тем же способом, что и
+    # рабочие, поэтому отваливается вместе с ними и годится как индикатор.
+    try:
+        keyboard.add_hotkey(HEARTBEAT_SCAN, _on_heartbeat)
+    except Exception as e:
+        log_error(f"add_hotkey heartbeat: {e}")
+
 
 def worker_loop():
     while not stop_event.is_set():
@@ -1561,6 +1606,143 @@ def keyboard_watchdog_loop() -> None:
                 _winkeyboard.shift_is_pressed = False
         except Exception as e:
             log_error(f"watchdog: {e}")
+
+
+# ============================================================
+# Самопроверка горячих клавиш и перезапуск
+# ============================================================
+# Watchdog выше лечит только один сбой — залипшую клавишу. Но 04.08.2026
+# хоткеи отвалились при полностью здоровом с виду процессе: потоки живы, хук
+# получает события, залипших клавиш нет, очередь разбирается — а обработчик
+# хоткея не вызывается. Причину внутри keyboard найти не удалось, зато сбой
+# надёжно виден снаружи: посланная себе клавиша не доходит до обработчика.
+# Ниже — проверка ровно этого пути и перезапуск, если он оборван.
+_ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
+
+
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [("wVk", ctypes.c_ushort), ("wScan", ctypes.c_ushort),
+                ("dwFlags", ctypes.c_ulong), ("time", ctypes.c_ulong),
+                ("dwExtraInfo", _ULONG_PTR)]
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long),
+                ("mouseData", ctypes.c_ulong), ("dwFlags", ctypes.c_ulong),
+                ("time", ctypes.c_ulong), ("dwExtraInfo", _ULONG_PTR)]
+
+
+class _HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [("uMsg", ctypes.c_ulong), ("wParamL", ctypes.c_ushort),
+                ("wParamH", ctypes.c_ushort)]
+
+
+class _INPUTUNION(ctypes.Union):
+    # Союз обязан включать самый большой вариант (mouse), иначе размер структуры
+    # не сойдётся с тем, что ждёт SendInput, и он вернёт ERROR_INVALID_PARAMETER.
+    _fields_ = [("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT), ("hi", _HARDWAREINPUT)]
+
+
+class _INPUT(ctypes.Structure):
+    _anonymous_ = ("u",)
+    _fields_ = [("type", ctypes.c_ulong), ("u", _INPUTUNION)]
+
+
+def _on_heartbeat() -> None:
+    _heartbeat_seen.set()
+
+
+def _send_heartbeat_key() -> int:
+    user32 = ctypes.windll.user32
+    events = (_INPUT * 2)()
+    events[0].type = 1
+    events[0].ki = _KEYBDINPUT(HEARTBEAT_VK, 0, 0, 0, 0)
+    events[1].type = 1
+    events[1].ki = _KEYBDINPUT(HEARTBEAT_VK, 0, 0x0002, 0, 0)  # KEYEVENTF_KEYUP
+    return user32.SendInput(2, ctypes.byref(events), ctypes.sizeof(_INPUT))
+
+
+def _input_desktop_available() -> bool:
+    """False на защищённом рабочем столе (UAC) и экране блокировки.
+
+    Там наш хук ввода не видит вообще ничего — это не поломка, и перезапуск
+    делу не поможет, поэтому проверку в такие моменты просто пропускаем.
+    """
+    user32 = ctypes.windll.user32
+    desktop = user32.OpenInputDesktop(0, False, 0x0100)  # DESKTOP_READOBJECTS
+    if not desktop:
+        return False
+    user32.CloseDesktop(desktop)
+    return True
+
+
+def _hotkeys_alive() -> bool:
+    _heartbeat_seen.clear()
+    try:
+        if not _send_heartbeat_key():
+            return True  # не смогли послать — судить не о чем
+    except Exception as e:
+        log_error(f"heartbeat send: {e}")
+        return True
+    return _heartbeat_seen.wait(HEARTBEAT_TIMEOUT)
+
+
+def heartbeat_loop() -> None:
+    fails = 0
+    while not stop_event.wait(HEARTBEAT_INTERVAL):
+        try:
+            if not _input_desktop_available():
+                continue
+            if _hotkeys_alive():
+                fails = 0
+                continue
+            fails += 1
+            log_error(f"самопроверка: горячие клавиши не отвечают ({fails})")
+            if fails >= HEARTBEAT_FAILS_BEFORE_RESTART:
+                log_error("самопроверка: перезапускаюсь")
+                restart_app(quiet=True)
+                return
+        except Exception as e:
+            log_error(f"heartbeat_loop: {e}")
+            fails = 0
+
+
+def _restart_command() -> list:
+    py = sys.executable
+    pyw = py.replace("python.exe", "pythonw.exe")
+    if not os.path.exists(pyw):
+        pyw = py
+    return [pyw, os.path.abspath(__file__), RESTART_FLAG]
+
+
+def restart_app(quiet: bool = False) -> None:
+    """Поднимает свежую копию и гасит текущую.
+
+    Новая копия стартует с RESTART_FLAG и подождёт, пока мы отпустим мьютекс,
+    иначе она решит, что программа уже запущена, и молча закроется.
+    """
+    try:
+        subprocess.Popen(
+            _restart_command(),
+            close_fds=True,
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+    except Exception as e:
+        log_error(f"restart: {e}")
+        if not quiet:
+            notify(t('notify.restart_failed'))
+        return
+
+    stop_event.set()
+    try:
+        keyboard.remove_all_hotkeys()
+    except Exception:
+        pass
+    if icon_ref is not None:
+        try:
+            icon_ref.stop()
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -1697,6 +1879,10 @@ def _build_format_menu() -> pystray.Menu:
     )
 
 
+def menu_restart(icon, item):
+    restart_app()
+
+
 def menu_exit(icon, item):
     stop_event.set()
     try:
@@ -1789,6 +1975,7 @@ def build_menu():
         pystray.MenuItem(lambda item: t('menu.open_folder'), menu_open_screenshots, default=True),
         pystray.MenuItem(lambda item: t('menu.open_log'), menu_open_log),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem(lambda item: t('menu.restart'), menu_restart),
         pystray.MenuItem(lambda item: t('menu.exit'), menu_exit),
     )
 
@@ -1808,16 +1995,27 @@ def main() -> None:
         except Exception:
             pass
 
-    # Защита от двойного запуска
-    _mutex_handle = win32event.CreateMutex(None, False, MUTEX_NAME)
-    if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
-        ctypes.windll.user32.MessageBoxW(
-            0,
-            t('msg.already_running'),
-            APP_TITLE,
-            0x40,
-        )
-        sys.exit(0)
+    # Защита от двойного запуска. При перезапуске старая копия ещё догорает и
+    # держит мьютекс, поэтому даём ей время уйти, а не рапортуем «уже запущен».
+    deadline = time.monotonic() + (RESTART_WAIT if RESTART_FLAG in sys.argv else 0.0)
+    while True:
+        _mutex_handle = win32event.CreateMutex(None, False, MUTEX_NAME)
+        if win32api.GetLastError() != winerror.ERROR_ALREADY_EXISTS:
+            break
+        try:
+            win32api.CloseHandle(_mutex_handle)
+        except Exception:
+            pass
+        _mutex_handle = None
+        if time.monotonic() >= deadline:
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                t('msg.already_running'),
+                APP_TITLE,
+                0x40,
+            )
+            sys.exit(0)
+        time.sleep(0.25)
 
     try:
         os.makedirs(DEFAULT_SCREENSHOTS_DIR, exist_ok=True)
@@ -1831,6 +2029,7 @@ def main() -> None:
 
     threading.Thread(target=keyboard_watchdog_loop, daemon=True).start()
     threading.Thread(target=cleanup_loop, daemon=True).start()
+    threading.Thread(target=heartbeat_loop, daemon=True).start()
 
     icon_ref = pystray.Icon(
         "screenshot_to_terminal",
