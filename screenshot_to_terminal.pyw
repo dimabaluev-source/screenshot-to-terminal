@@ -76,10 +76,16 @@ RESTART_WAIT = 10.0
 # перестают срабатывать — лечится только перезапуском (разбор 04.08.2026:
 # события доходят до очереди keyboard, но обработчик хоткея не вызывается).
 # Поэтому раз в минуту шлём себе безобидную клавишу и проверяем, что она прошла
-# весь путь до обработчика. Не прошла дважды подряд — перезапускаемся.
+# весь путь до обработчика. Не прошла трижды подряд — перезапускаемся.
+#
+# Таймаут щедрый намеренно. Полутора секунд не хватало: очередь ввода общая на
+# всю систему, и любой сосед с низкоуровневым хуком (или просто загруженный
+# процессор) задерживает её на секунды. С 05.08.2026 это давало по 100-300
+# ложных «хоткеи не отвечают» в день и по нескольку ненужных перезапусков —
+# а перезапуск не бесплатный: на нём процесс однажды упал с 0xc000001d.
 HEARTBEAT_INTERVAL = 60.0
-HEARTBEAT_TIMEOUT = 1.5
-HEARTBEAT_FAILS_BEFORE_RESTART = 2
+HEARTBEAT_TIMEOUT = 6.0
+HEARTBEAT_FAILS_BEFORE_RESTART = 3
 HEARTBEAT_VK = 0xFC             # VK_NONAME: ни одно приложение на неё не реагирует
 HEARTBEAT_SCAN = -HEARTBEAT_VK  # keyboard хранит клавишу без скан-кода как -vk
 
@@ -1722,7 +1728,7 @@ def restart_app(quiet: bool = False) -> None:
     иначе она решит, что программа уже запущена, и молча закроется.
     """
     try:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             _restart_command(),
             close_fds=True,
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
@@ -1733,6 +1739,7 @@ def restart_app(quiet: bool = False) -> None:
             notify(t('notify.restart_failed'))
         return
 
+    log_info(f"перезапуск: новая копия pid={proc.pid}, гашу себя (pid={os.getpid()})")
     stop_event.set()
     try:
         keyboard.remove_all_hotkeys()
@@ -1880,10 +1887,12 @@ def _build_format_menu() -> pystray.Menu:
 
 
 def menu_restart(icon, item):
+    log_info("меню: перезапуск")
     restart_app()
 
 
 def menu_exit(icon, item):
+    log_info("меню: выход")
     stop_event.set()
     try:
         keyboard.remove_all_hotkeys()
@@ -2008,6 +2017,10 @@ def main() -> None:
             pass
         _mutex_handle = None
         if time.monotonic() >= deadline:
+            log_error(
+                "старт отменён: мьютекс занят, копия уже запущена "
+                f"(restart={RESTART_FLAG in sys.argv})"
+            )
             ctypes.windll.user32.MessageBoxW(
                 0,
                 t('msg.already_running'),
@@ -2016,6 +2029,11 @@ def main() -> None:
             )
             sys.exit(0)
         time.sleep(0.25)
+
+    log_info(
+        f"старт: pid={os.getpid()}, restart={RESTART_FLAG in sys.argv}, "
+        f"python={sys.executable}"
+    )
 
     try:
         os.makedirs(DEFAULT_SCREENSHOTS_DIR, exist_ok=True)
@@ -2042,6 +2060,14 @@ def main() -> None:
 
     stop_event.set()
     worker_thread.join(timeout=2.0)
+    log_info(f"выход: pid={os.getpid()}")
+
+    # Жёсткий выход вместо возврата из main. На догорании интерпретатора
+    # Windows успевает дёрнуть ctypes-колбэк клавиатурного хука, который сборщик
+    # мусора уже разобрал, и процесс падает с 0xc000001d — ровно это случилось
+    # 14.08.2026 в 14:10 при перезапуске (дамп в %LOCALAPPDATA%\CrashDumps).
+    # Хук и мьютекс освободит сама ОС при закрытии процесса.
+    os._exit(0)
 
 
 if __name__ == "__main__":
