@@ -1006,13 +1006,17 @@ def save_screenshot_quick() -> None:
 # Захват области экрана через overlay
 # ============================================================
 def _capture_screen_area_bbox():
-    """Spotlight-overlay: затемняем экран, область под курсором — без затемнения. Возвращает (x1, y1, x2, y2) или None.
+    """Spotlight-overlay: затемняем экран, область под курсором — без затемнения. Возвращает (bbox, кадр) или (None, None).
 
-    Производительность: затемнённый скриншот рисуется фоном ОДИН раз, а область
-    выделения делается прозрачной через -transparentcolor (там виден живой экран
-    на полной яркости). Прозрачный прямоугольник двигается через canvas.coords()
-    по сплошной заливке — без stipple и без PIL-операций на кадр — поэтому плавно
-    даже на 4K. Обновления коалесцируются до ~60fps.
+    Экран замораживается один раз в момент вызова: затемнённый кадр — фон
+    overlay, он же на полной яркости — содержимое окна-«прожектора» над
+    выделением. Поэтому и при выделении, и в сохранённом файле видно одно и то
+    же, включая состояние окна, которое потеряло фокус из-за overlay.
+
+    Производительность: обе картинки конвертируются в PhotoImage ОДИН раз. На
+    кадр приходятся только перемещение окна-«прожектора» и сдвиг Label внутри
+    него — без stipple и без PIL-кропа, поэтому плавно даже на 4K. Обновления
+    коалесцируются до ~60fps.
     """
     user32 = ctypes.windll.user32
     virtual_x = user32.GetSystemMetrics(76)
@@ -1027,19 +1031,11 @@ def _capture_screen_area_bbox():
     )
     dim = ImageEnhance.Brightness(bright).enhance(0.5)
 
-    # Magic-цвет для прозрачной «дырки». enhance(0.5) не даёт каналам значение
-    # 255, поэтому #ff00ff гарантированно отсутствует в затемнённом фоне.
-    MAGIC = '#ff00ff'
-
     root = tk.Tk()
     root.attributes('-topmost', True)
     root.overrideredirect(True)
     root.geometry(f"{virtual_w}x{virtual_h}+{virtual_x}+{virtual_y}")
     root.configure(cursor='crosshair')
-    try:
-        root.attributes('-transparentcolor', MAGIC)
-    except Exception:
-        pass
 
     canvas = tk.Canvas(root, highlightthickness=0, borderwidth=0, bg='black',
                        width=virtual_w, height=virtual_h)
@@ -1050,17 +1046,63 @@ def _capture_screen_area_bbox():
     canvas.create_image(0, 0, anchor='nw', image=dim_tk)
     canvas._dim_ref = dim_tk  # держим ссылку, иначе сборщик уберёт
 
-    # «Дырка» (прозрачная область) + красная рамка поверх неё
-    hole = canvas.create_rectangle(0, 0, 0, 0, fill=MAGIC, outline='', width=0)
-    sel_rect = canvas.create_rectangle(0, 0, 0, 0, outline='red', width=2)
+    # Окно-«прожектор»: замороженный кадр на полной яркости в границах выделения.
+    # Красная рамка — фон самого окна, поэтому рамка и кадр едут одним куском,
+    # без рассинхрона между двумя окнами.
+    BORDER = 2
+    spot = tk.Toplevel(root, bg='red')
+    spot.withdraw()
+    spot.overrideredirect(True)
+    spot.attributes('-topmost', True)
+    spot.configure(cursor='crosshair')
 
-    # Подпись с размером выделения. Рисуется по затемнённому фону (не по «дырке»),
-    # иначе попала бы в кадр — поэтому держим её снаружи рамки.
+    # Label держит картинку целиком; наружу торчит только нужный кусок, потому
+    # что окно меньше Label, а сам Label сдвинут отрицательным offset.
+    bright_tk = ImageTk.PhotoImage(bright)
+    bright_label = tk.Label(spot, image=bright_tk, bd=0, highlightthickness=0,
+                            cursor='crosshair')
+    bright_label._bright_ref = bright_tk
+
+    def _no_activate():
+        """Клик по «прожектору» не должен уводить фокус с root, иначе отвалятся
+        Escape и grab_set. Вызывается повторно после первого показа: Tk на
+        Windows может пересоздать HWND при deiconify и потерять стиль."""
+        try:
+            hwnd = user32.GetAncestor(spot.winfo_id(), 2) or spot.winfo_id()
+            GWL_EXSTYLE, WS_EX_NOACTIVATE = -20, 0x08000000
+            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE)
+        except Exception:
+            pass
+
+    _no_activate()
+
+    # Подпись с размером выделения. Рисуется по затемнённому фону (не по кадру),
+    # иначе попала бы в снимок — поэтому держим её снаружи рамки.
     size_bg = canvas.create_rectangle(0, 0, 0, 0, fill='#1a1a1a', outline='', state='hidden')
     size_text = canvas.create_text(0, 0, text='', anchor='nw', fill='white',
                                    font=('Segoe UI', 11, 'bold'), state='hidden')
 
-    state = {'start': None, 'bbox': None, 'after_id': None, 'last': None}
+    state = {'start': None, 'bbox': None, 'after_id': None, 'last': None,
+             'spot_shown': False}
+
+    def _place_spot(cx1, cy1, cx2, cy2):
+        width, height = int(cx2 - cx1), int(cy2 - cy1)
+        if width <= 0 or height <= 0:
+            if state['spot_shown']:
+                spot.withdraw()
+                state['spot_shown'] = False
+            return
+        # Сдвиг Label — до geometry, иначе на кадр мелькнёт не тот кусок кадра.
+        bright_label.place(x=BORDER - int(cx1), y=BORDER - int(cy1))
+        spot.geometry(f"{width + 2 * BORDER}x{height + 2 * BORDER}"
+                      f"+{virtual_x + int(cx1) - BORDER}"
+                      f"+{virtual_y + int(cy1) - BORDER}")
+        if not state['spot_shown']:
+            spot.deiconify()
+            spot.lift()
+            _no_activate()
+            state['spot_shown'] = True
 
     def _place_size_label(cx1, cy1, cx2, cy2):
         width, height = int(cx2 - cx1), int(cy2 - cy1)
@@ -1088,8 +1130,7 @@ def _capture_screen_area_bbox():
         cy1 = max(0, min(virtual_h, cy1))
         cx2 = max(0, min(virtual_w, cx2))
         cy2 = max(0, min(virtual_h, cy2))
-        canvas.coords(hole, cx1, cy1, cx2, cy2)
-        canvas.coords(sel_rect, cx1, cy1, cx2, cy2)
+        _place_spot(cx1, cy1, cx2, cy2)
         _place_size_label(cx1, cy1, cx2, cy2)
 
     def _apply_pending():
@@ -1099,6 +1140,10 @@ def _capture_screen_area_bbox():
 
     def finish(bbox):
         state['bbox'] = bbox
+        try:
+            spot.withdraw()
+        except Exception:
+            pass
         if state['after_id'] is not None:
             try:
                 canvas.after_cancel(state['after_id'])
@@ -1141,11 +1186,13 @@ def _capture_screen_area_bbox():
     def on_cancel(event=None):
         finish(None)
 
-    canvas.bind('<ButtonPress-1>', on_press)
-    canvas.bind('<B1-Motion>', on_drag)
-    canvas.bind('<ButtonRelease-1>', on_release)
-    canvas.bind('<ButtonPress-3>', on_cancel)  # правый клик — отмена
-    root.bind('<Escape>', on_cancel)
+    # bind_all, а не canvas.bind: курсор ходит и над окном-«прожектором», его
+    # события приходят от другого виджета. Координаты берём из x_root/y_root.
+    root.bind_all('<ButtonPress-1>', on_press)
+    root.bind_all('<B1-Motion>', on_drag)
+    root.bind_all('<ButtonRelease-1>', on_release)
+    root.bind_all('<ButtonPress-3>', on_cancel)  # правый клик — отмена
+    root.bind_all('<Escape>', on_cancel)
     root.protocol('WM_DELETE_WINDOW', on_cancel)
 
     # Фокус и захват ввода — чтобы Escape гарантированно срабатывал и mainloop
@@ -1169,17 +1216,26 @@ def _capture_screen_area_bbox():
         root.destroy()
     except Exception:
         pass
-    return state['bbox']
+
+    bbox = state['bbox']
+    if not bbox:
+        return None, None
+
+    # Кадр режем из `bright` — снимка, сделанного ДО показа overlay. Пересъёмка
+    # экрана после overlay дала бы окно, потерявшее фокус: Windows перекрашивает
+    # заголовок в «неактивный» цвет, а приложения с autoHideMenuBar (Electron)
+    # прячут строку меню. Заморозка отдаёт ровно то, что пользователь видел,
+    # когда нажимал горячую клавишу.
+    x1, y1, x2, y2 = bbox
+    frame = bright.crop((x1 - virtual_x, y1 - virtual_y,
+                         x2 - virtual_x, y2 - virtual_y))
+    return bbox, frame
 
 
 def save_screenshot_area() -> None:
     try:
-        bbox = _capture_screen_area_bbox()
-        if not bbox:
-            return
-
-        image = ImageGrab.grab(bbox=bbox, all_screens=True)
-        if not isinstance(image, Image.Image):
+        bbox, image = _capture_screen_area_bbox()
+        if not bbox or not isinstance(image, Image.Image):
             return
 
         os.makedirs(DEFAULT_SCREENSHOTS_DIR, exist_ok=True)
